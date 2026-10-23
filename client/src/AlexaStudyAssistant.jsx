@@ -117,6 +117,22 @@ function getErrorMessage(data, fallback) {
   return data?.message || data?.error || fallback;
 }
 
+function cleanSpeechText(text) {
+  return String(text || "")
+    .replace(/```[\s\S]*?```/g, "Code block omitted.")
+    .replace(/`([^`]*)`/g, "$1")
+    .replace(/\*\*(.*?)\*\*/g, "$1")
+    .replace(/__(.*?)__/g, "$1")
+    .replace(/(^|\s)\*([^*\n]+)\*(?=\s|$)/g, "$1$2")
+    .replace(/(^|\s)_([^_\n]+)_(?=\s|$)/g, "$1$2")
+    .replace(/https?:\/\/\S+/g, "link")
+    .replace(/[|*_#~`]/g, " ")
+    .replace(/[ \t]+/g, " ")
+    .replace(/\n{2,}/g, ". ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
 function getSubjectId(subject) {
   return subject?._id || subject?.id || "";
 }
@@ -165,12 +181,16 @@ function isScheduleRequest(text) {
       value
     );
 
-  // Supports both "schedule a session tomorrow" and
-  // "I want to study cybersecurity tomorrow at 7".
   return (
     (explicitAction && (studyContext || timeContext)) ||
     (studyContext && timeContext)
   );
+}
+
+function isCompleteSessionRequest(text) {
+  return /\b(mark|set|update|make|complete|finish)\b/i.test(text) &&
+    /\b(completed|complete|finished|done)\b/i.test(text) &&
+    /\b(session|sessions|study block)\b/i.test(text);
 }
 
 export default function AlexaStudyAssistant({ onNavigate, onDataChange }) {
@@ -211,14 +231,18 @@ export default function AlexaStudyAssistant({ onNavigate, onDataChange }) {
       ]);
 
       if (!subjectsResponse.ok || !sessionsResponse.ok) {
-        throw new Error("Could not load subjects and study sessions. Check that the backend is running.");
+        throw new Error(
+          "Could not load subjects and study sessions. Check that the backend is running."
+        );
       }
 
       const subjectsData = await subjectsResponse.json();
       const sessionsData = await sessionsResponse.json();
 
       if (!Array.isArray(subjectsData) || !Array.isArray(sessionsData)) {
-        throw new Error("The subjects or sessions API returned an unexpected response.");
+        throw new Error(
+          "The subjects or sessions API returned an unexpected response."
+        );
       }
 
       if (!mountedRef.current) return;
@@ -228,9 +252,7 @@ export default function AlexaStudyAssistant({ onNavigate, onDataChange }) {
 
       setForm((previous) => ({
         ...previous,
-        subjectId:
-          previous.subjectId ||
-          getSubjectId(subjectsData[0]),
+        subjectId: previous.subjectId || getSubjectId(subjectsData[0]),
       }));
     } catch (err) {
       if (mountedRef.current) {
@@ -259,9 +281,16 @@ export default function AlexaStudyAssistant({ onNavigate, onDataChange }) {
       return;
     }
 
+    const cleanedText = cleanSpeechText(text);
+
+    if (!cleanedText) {
+      setError("There is no readable text to speak.");
+      return;
+    }
+
     window.speechSynthesis.cancel();
 
-    const utterance = new SpeechSynthesisUtterance(text);
+    const utterance = new SpeechSynthesisUtterance(cleanedText);
     utterance.lang = "en-IN";
     utterance.rate = 1;
 
@@ -328,7 +357,8 @@ export default function AlexaStudyAssistant({ onNavigate, onDataChange }) {
 
       const selectedName =
         matchedSubject?.name ||
-        subjects.find((subject) => getSubjectId(subject) === selectedSubjectId)?.name;
+        subjects.find((subject) => getSubjectId(subject) === selectedSubjectId)
+          ?.name;
 
       const subjectMessage = matchedSubject
         ? `I've prepared a session for ${selectedName}.`
@@ -340,6 +370,130 @@ export default function AlexaStudyAssistant({ onNavigate, onDataChange }) {
       );
     },
     [addMessage, subjects]
+  );
+
+  const markSessionCompleted = useCallback(
+    async (text) => {
+      const pendingSessions = sessions.filter(
+        (session) => String(session.status || "").toLowerCase() !== "completed"
+      );
+
+      if (!pendingSessions.length) {
+        addMessage(
+          "assistant",
+          "There are no incomplete study sessions to mark as completed."
+        );
+        return true;
+      }
+
+      const lower = text.toLowerCase();
+
+      const matchedSubject = subjects.find((subject) =>
+        lower.includes(String(subject.name || "").toLowerCase())
+      );
+
+      let candidates = pendingSessions;
+
+      if (matchedSubject) {
+        candidates = pendingSessions.filter(
+          (session) =>
+            getSessionSubject(session, subjects).toLowerCase() ===
+            String(matchedSubject.name || "").toLowerCase()
+        );
+      }
+
+      const mentionsToday = /\btoday\b/.test(lower);
+      const mentionsYesterday = /\byesterday\b/.test(lower);
+
+      if (mentionsToday) {
+        candidates = candidates.filter(
+          (session) => session.date === localDate(0)
+        );
+      } else if (mentionsYesterday) {
+        candidates = candidates.filter(
+          (session) => session.date === localDate(-1)
+        );
+      }
+
+      if (candidates.length === 0) {
+        addMessage(
+          "assistant",
+          "I couldn't find an incomplete session matching that description. Try mentioning the exact subject name or session date."
+        );
+        return true;
+      }
+
+      if (candidates.length > 1) {
+        const choices = candidates
+          .slice(0, 5)
+          .map(
+            (session) =>
+              `${getSessionSubject(session, subjects)} on ${formatDate(
+                session.date
+              )} at ${formatTime(session.startTime)}`
+          )
+          .join("; ");
+
+        addMessage(
+          "assistant",
+          `I found more than one possible session: ${choices}. Please specify the subject and date so I update the correct one.`
+        );
+        return true;
+      }
+
+      const session = candidates[0];
+      const sessionId = session._id || session.id;
+
+      if (!sessionId) {
+        addMessage(
+          "assistant",
+          "This session doesn't have an ID, so I can't update it safely."
+        );
+        return true;
+      }
+
+      try {
+        const response = await fetch(
+          `${API_URL}/sessions/${encodeURIComponent(sessionId)}`,
+          {
+            method: "PATCH",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ status: "completed" }),
+          }
+        );
+
+        const data = await response.json().catch(() => ({}));
+
+        if (!response.ok) {
+          throw new Error(
+            getErrorMessage(
+              data,
+              `Couldn't update the session (${response.status}).`
+            )
+          );
+        }
+
+        await loadData();
+        onDataChange?.();
+
+        addMessage(
+          "assistant",
+          `Marked your ${getSessionSubject(
+            session,
+            subjects
+          )} session on ${formatDate(session.date)} as completed.`
+        );
+      } catch (err) {
+        setError(err.message || "Could not update the session.");
+        addMessage(
+          "assistant",
+          "I couldn't update the session. Please check the error above and the backend terminal."
+        );
+      }
+
+      return true;
+    },
+    [addMessage, loadData, onDataChange, sessions, subjects]
   );
 
   const handleCommand = useCallback(
@@ -364,22 +518,35 @@ export default function AlexaStudyAssistant({ onNavigate, onDataChange }) {
         /\b(subjects|my subjects)\b/.test(lower)
       ) {
         if (!subjects.length) {
-          addMessage("assistant", "You haven't added any subjects yet. Open My Subjects to add one.");
+          addMessage(
+            "assistant",
+            "You haven't added any subjects yet. Open My Subjects to add one."
+          );
         } else {
           addMessage(
             "assistant",
-            `Your subjects are: ${subjects.map((subject) => subject.name).filter(Boolean).join(", ")}.`
+            `Your subjects are: ${subjects
+              .map((subject) => subject.name)
+              .filter(Boolean)
+              .join(", ")}.`
           );
         }
         return;
       }
 
       if (
-        /\b(show|list|check|what are|tell me|read|when is|when are)\b/.test(lower) &&
-        /\b(sessions|study sessions|study schedule|my schedule|upcoming sessions)\b/.test(lower)
+        /\b(show|list|check|what are|tell me|read|when is|when are)\b/.test(
+          lower
+        ) &&
+        /\b(sessions|study sessions|study schedule|my schedule|upcoming sessions)\b/.test(
+          lower
+        )
       ) {
         if (!sessions.length) {
-          addMessage("assistant", "You don't have any study sessions saved yet. Ask me to schedule one.");
+          addMessage(
+            "assistant",
+            "You don't have any study sessions saved yet. Ask me to schedule one."
+          );
         } else {
           const upcoming = [...sessions]
             .sort((a, b) =>
@@ -392,12 +559,21 @@ export default function AlexaStudyAssistant({ onNavigate, onDataChange }) {
           const summary = upcoming
             .map(
               (session) =>
-                `${getSessionSubject(session, subjects)} on ${formatDate(session.date)} at ${formatTime(session.startTime)} for ${session.durationMinutes || 0} minutes`
+                `${getSessionSubject(session, subjects)} on ${formatDate(
+                  session.date
+                )} at ${formatTime(session.startTime)} for ${
+                  session.durationMinutes || 0
+                } minutes (${session.status || "scheduled"})`
             )
             .join(". ");
 
           addMessage("assistant", `Here are your saved sessions: ${summary}.`);
         }
+        return;
+      }
+
+      if (isCompleteSessionRequest(text)) {
+        await markSessionCompleted(text);
         return;
       }
 
@@ -415,14 +591,16 @@ export default function AlexaStudyAssistant({ onNavigate, onDataChange }) {
         return;
       }
 
-      if (/\b(clear|reset)\b/.test(lower) && /\bconversation|chat|messages\b/.test(lower)) {
+      if (
+        /\b(clear|reset)\b/.test(lower) &&
+        /\bconversation|chat|messages\b/.test(lower)
+      ) {
         setMessages([INITIAL_MESSAGE]);
         setProposal(null);
         addMessage("assistant", "I've cleared the conversation.");
         return;
       }
 
-      // All other questions use the existing Groq-enabled backend.
       const requestId = ++requestIdRef.current;
       setLoading(true);
 
@@ -430,27 +608,15 @@ export default function AlexaStudyAssistant({ onNavigate, onDataChange }) {
         const response = await fetch(`${API_URL}/ai/chat`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            question: text,
-            context: {
-              app: "StudyPilot AI",
-              subjects: subjects.map((subject) => subject.name),
-              sessions: sessions.slice(0, 20).map((session) => ({
-                subjectName: getSessionSubject(session, subjects),
-                subjectId: session.subjectId,
-                date: session.date,
-                startTime: session.startTime,
-                durationMinutes: session.durationMinutes,
-                status: session.status,
-              })),
-            },
-          }),
+          body: JSON.stringify({ message: text }),
         });
 
         const data = await response.json().catch(() => ({}));
 
         if (!response.ok) {
-          throw new Error(getErrorMessage(data, `AI request failed (${response.status}).`));
+          throw new Error(
+            getErrorMessage(data, `AI request failed (${response.status}).`)
+          );
         }
 
         const answer = data.answer || data.message;
@@ -467,7 +633,7 @@ export default function AlexaStudyAssistant({ onNavigate, onDataChange }) {
           setError(err.message || "Could not get an AI response.");
           addMessage(
             "assistant",
-            "I couldn't reach the AI service. Please check the backend terminal and the /api/ai/chat request."
+            "I couldn't get an AI response. Check the error shown above and the backend terminal."
           );
         }
       } finally {
@@ -476,7 +642,15 @@ export default function AlexaStudyAssistant({ onNavigate, onDataChange }) {
         }
       }
     },
-    [addMessage, loadData, navigateTo, prepareSession, sessions, subjects]
+    [
+      addMessage,
+      loadData,
+      markSessionCompleted,
+      navigateTo,
+      prepareSession,
+      sessions,
+      subjects,
+    ]
   );
 
   const submitText = useCallback(
@@ -496,7 +670,9 @@ export default function AlexaStudyAssistant({ onNavigate, onDataChange }) {
       window.SpeechRecognition || window.webkitSpeechRecognition;
 
     if (!SpeechRecognition) {
-      setError("Speech recognition isn't supported here. Use the latest Google Chrome and allow microphone access.");
+      setError(
+        "Speech recognition isn't supported here. Use the latest Google Chrome and allow microphone access."
+      );
       return;
     }
 
@@ -531,7 +707,8 @@ export default function AlexaStudyAssistant({ onNavigate, onDataChange }) {
       }
 
       if (finalTranscript.trim()) {
-        transcriptRef.current = `${transcriptRef.current} ${finalTranscript.trim()}`.trim();
+        transcriptRef.current =
+          `${transcriptRef.current} ${finalTranscript.trim()}`.trim();
       }
 
       setInput(`${transcriptRef.current} ${interimTranscript}`.trim());
@@ -556,6 +733,7 @@ export default function AlexaStudyAssistant({ onNavigate, onDataChange }) {
         handlingSpeechRef.current = true;
         setInput("");
         addMessage("user", transcript);
+
         handleCommand(transcript).finally(() => {
           handlingSpeechRef.current = false;
         });
@@ -614,26 +792,37 @@ export default function AlexaStudyAssistant({ onNavigate, onDataChange }) {
       const data = await response.json().catch(() => ({}));
 
       if (!response.ok) {
-        throw new Error(getErrorMessage(data, `Couldn't save the session (${response.status}).`));
+        throw new Error(
+          getErrorMessage(data, `Couldn't save the session (${response.status}).`)
+        );
       }
 
       const subject = subjects.find(
         (item) => getSubjectId(item) === form.subjectId
       );
 
+      const savedDate = form.date;
+      const savedTime = form.startTime;
+      const savedDuration = Number(form.durationMinutes);
+
       setProposal(null);
       await loadData();
       onDataChange?.();
 
       const confirmation =
-        `Session saved successfully: ${subject?.name || data.subjectName || "Study session"}, ` +
-        `${formatDate(form.date)} at ${formatTime(form.startTime)}, ` +
-        `${Number(form.durationMinutes)} minutes.`;
+        `Session saved successfully: ${
+          subject?.name || data.subjectName || "Study session"
+        }, ${formatDate(savedDate)} at ${formatTime(
+          savedTime
+        )}, ${savedDuration} minutes.`;
 
       setNotice(confirmation);
       addMessage("assistant", confirmation);
     } catch (err) {
-      setError(err.message || "The session couldn't be saved. Check the backend terminal.");
+      setError(
+        err.message ||
+          "The session couldn't be saved. Check the backend terminal."
+      );
     } finally {
       setSaving(false);
     }
@@ -650,6 +839,7 @@ export default function AlexaStudyAssistant({ onNavigate, onDataChange }) {
     "Show my subjects",
     "Show my study sessions",
     "Schedule a 30-minute session for tomorrow",
+    "Mark my Data Structures session as completed",
     "Explain cloud computing simply",
   ];
 
@@ -674,14 +864,24 @@ export default function AlexaStudyAssistant({ onNavigate, onDataChange }) {
             <span>Subjects</span>
             <strong>{subjects.length}</strong>
           </div>
+
           <div className="voice-stat-card">
             <span>Saved sessions</span>
             <strong>{sessions.length}</strong>
           </div>
+
           <div className="voice-stat-card">
             <span>Assistant</span>
             <strong>
-              {saving ? "Saving…" : loading ? "Thinking…" : listening ? "Listening…" : speaking ? "Speaking…" : "Ready"}
+              {saving
+                ? "Saving…"
+                : loading
+                  ? "Thinking…"
+                  : listening
+                    ? "Listening…"
+                    : speaking
+                      ? "Speaking…"
+                      : "Ready"}
             </strong>
           </div>
         </div>
@@ -702,6 +902,7 @@ export default function AlexaStudyAssistant({ onNavigate, onDataChange }) {
       <div className="panel" style={{ marginBottom: 20 }}>
         <div className="panel-heading">
           <h3>Conversation</h3>
+
           <button
             type="button"
             className="icon-button"
@@ -734,7 +935,8 @@ export default function AlexaStudyAssistant({ onNavigate, onDataChange }) {
             <div
               key={`${index}-${message.role}`}
               style={{
-                alignSelf: message.role === "user" ? "flex-end" : "flex-start",
+                alignSelf:
+                  message.role === "user" ? "flex-end" : "flex-start",
                 maxWidth: "88%",
                 minWidth: 0,
                 padding: "14px 16px",
@@ -846,7 +1048,10 @@ export default function AlexaStudyAssistant({ onNavigate, onDataChange }) {
 
           <div style={{ display: "grid", gap: 16 }}>
             <label>
-              <span style={{ display: "block", marginBottom: 7 }}>Subject</span>
+              <span style={{ display: "block", marginBottom: 7 }}>
+                Subject
+              </span>
+
               <select
                 value={form.subjectId}
                 onChange={(event) =>
@@ -869,6 +1074,7 @@ export default function AlexaStudyAssistant({ onNavigate, onDataChange }) {
 
             <label>
               <span style={{ display: "block", marginBottom: 7 }}>Date</span>
+
               <input
                 type="date"
                 value={form.date}
@@ -883,7 +1089,10 @@ export default function AlexaStudyAssistant({ onNavigate, onDataChange }) {
             </label>
 
             <label>
-              <span style={{ display: "block", marginBottom: 7 }}>Start time</span>
+              <span style={{ display: "block", marginBottom: 7 }}>
+                Start time
+              </span>
+
               <input
                 type="time"
                 value={form.startTime}
@@ -900,6 +1109,7 @@ export default function AlexaStudyAssistant({ onNavigate, onDataChange }) {
               <span style={{ display: "block", marginBottom: 7 }}>
                 Duration in minutes
               </span>
+
               <input
                 type="number"
                 min="15"
