@@ -1,4 +1,4 @@
-
+```jsx
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import "./AlexaStudyAssistant.css";
 
@@ -16,7 +16,7 @@ const PAGE_COMMANDS = [
 
 const INITIAL_MESSAGE = {
   role: "assistant",
-  text: "Hi! I'm your StudyPilot assistant. Ask me a question, open a page, check your study sessions, or ask me to schedule a session. I'll ask you to confirm before saving a session.",
+  text: "Hi! I'm your StudyPilot assistant. Ask me a question, open a page, check your study sessions, mark a session completed, or schedule a session. I'll ask you to confirm before saving a session.",
 };
 
 function localDate(offset = 0) {
@@ -137,6 +137,10 @@ function getSubjectId(subject) {
   return subject?._id || subject?.id || "";
 }
 
+function getSessionId(session) {
+  return session?._id || session?.id || "";
+}
+
 function getSessionSubject(session, subjects) {
   if (session.subjectName) return session.subjectName;
 
@@ -187,6 +191,28 @@ function isScheduleRequest(text) {
   );
 }
 
+function isCompleteSessionRequest(text) {
+  const value = text.toLowerCase();
+
+  return (
+    /\b(mark|set|update|make|complete|finish)\b/.test(value) &&
+    /\b(completed|complete|finished|done)\b/.test(value) &&
+    /\b(session|sessions|study block|study session)\b/.test(value)
+  );
+}
+
+function getSessionMatchText(session, subjects) {
+  return [
+    getSessionSubject(session, subjects),
+    session.date || "",
+    formatDate(session.date),
+    session.startTime || "",
+    formatTime(session.startTime),
+  ]
+    .join(" ")
+    .toLowerCase();
+}
+
 export default function AlexaStudyAssistant({ onNavigate, onDataChange }) {
   const [subjects, setSubjects] = useState([]);
   const [sessions, setSessions] = useState([]);
@@ -199,6 +225,7 @@ export default function AlexaStudyAssistant({ onNavigate, onDataChange }) {
   const [notice, setNotice] = useState("");
   const [proposal, setProposal] = useState(null);
   const [saving, setSaving] = useState(false);
+  const [busySessionId, setBusySessionId] = useState("");
 
   const recognitionRef = useRef(null);
   const transcriptRef = useRef("");
@@ -246,8 +273,7 @@ export default function AlexaStudyAssistant({ onNavigate, onDataChange }) {
 
       setForm((previous) => ({
         ...previous,
-        subjectId:
-          previous.subjectId || getSubjectId(subjectsData[0]),
+        subjectId: previous.subjectId || getSubjectId(subjectsData[0]),
       }));
     } catch (err) {
       if (mountedRef.current) {
@@ -367,6 +393,139 @@ export default function AlexaStudyAssistant({ onNavigate, onDataChange }) {
     [addMessage, subjects]
   );
 
+  const markSessionCompleted = useCallback(
+    async (text) => {
+      const lower = text.toLowerCase();
+      const pendingSessions = sessions.filter(
+        (session) => session.status !== "completed"
+      );
+
+      if (!pendingSessions.length) {
+        addMessage(
+          "assistant",
+          "There are no sessions left to mark as completed. Your saved sessions are already completed, or you need to schedule a session first."
+        );
+        return;
+      }
+
+      const mentionedSubject = subjects.find((subject) => {
+        const name = String(subject.name || "").trim().toLowerCase();
+        return name.length > 0 && lower.includes(name);
+      });
+
+      let candidates = pendingSessions;
+
+      if (mentionedSubject) {
+        candidates = pendingSessions.filter(
+          (session) =>
+            getSessionSubject(session, subjects).toLowerCase() ===
+            String(mentionedSubject.name).trim().toLowerCase()
+        );
+      } else {
+        const dateMatch = lower.match(/\b(\d{4}-\d{2}-\d{2})\b/);
+        const mentionedDate = dateMatch
+          ? dateMatch[1]
+          : lower.includes("day before yesterday")
+            ? localDate(-2)
+            : lower.includes("yesterday")
+              ? localDate(-1)
+              : lower.includes("today")
+                ? localDate(0)
+                : null;
+
+        if (mentionedDate) {
+          candidates = pendingSessions.filter(
+            (session) => session.date === mentionedDate
+          );
+        }
+      }
+
+      if (candidates.length > 1) {
+        const options = candidates
+          .slice(0, 6)
+          .map(
+            (session) =>
+              `${getSessionSubject(session, subjects)} on ${formatDate(
+                session.date
+              )} at ${formatTime(session.startTime)}`
+          )
+          .join("; ");
+
+        addMessage(
+          "assistant",
+          `I found multiple sessions that could match. Please say the subject or date more specifically. Options include: ${options}.`
+        );
+        return;
+      }
+
+      if (candidates.length === 0) {
+        addMessage(
+          "assistant",
+          mentionedSubject
+            ? `I couldn't find an uncompleted session for ${mentionedSubject.name}. Please check your Study Planner.`
+            : "I couldn't identify which session you mean. Please say the subject name, for example: Mark my Data Structures session as completed."
+        );
+        return;
+      }
+
+      const session = candidates[0];
+      const sessionId = getSessionId(session);
+
+      if (!sessionId) {
+        addMessage(
+          "assistant",
+          "I couldn't identify this session's saved ID. Please update it in the Study Planner."
+        );
+        return;
+      }
+
+      setBusySessionId(sessionId);
+      setError("");
+      setNotice("");
+
+      try {
+        const response = await fetch(`${API_URL}/sessions/${sessionId}`, {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ status: "completed" }),
+        });
+
+        const data = await response.json().catch(() => ({}));
+
+        if (!response.ok) {
+          throw new Error(
+            getErrorMessage(
+              data,
+              `Couldn't mark the session completed (${response.status}).`
+            )
+          );
+        }
+
+        const confirmation = `Done! I've marked your ${getSessionSubject(
+          session,
+          subjects
+        )} session on ${formatDate(session.date)} at ${formatTime(
+          session.startTime
+        )} as completed.`;
+
+        await loadData();
+        onDataChange?.();
+
+        setNotice(confirmation);
+        addMessage("assistant", confirmation);
+      } catch (err) {
+        setError(err.message || "Couldn't update the study session.");
+        addMessage(
+          "assistant",
+          "I couldn't update that session. Please check the error message and try again."
+        );
+      } finally {
+        setBusySessionId("");
+      }
+    },
+    [addMessage, loadData, onDataChange, sessions, subjects]
+  );
+
   const handleCommand = useCallback(
     async (rawText) => {
       const text = rawText.trim();
@@ -381,6 +540,11 @@ export default function AlexaStudyAssistant({ onNavigate, onDataChange }) {
 
       if (pageCommand) {
         navigateTo(pageCommand.page, `Opening ${pageCommand.names[0]}.`);
+        return;
+      }
+
+      if (isCompleteSessionRequest(text)) {
+        await markSessionCompleted(text);
         return;
       }
 
@@ -434,7 +598,7 @@ export default function AlexaStudyAssistant({ onNavigate, onDataChange }) {
                   session.date
                 )} at ${formatTime(session.startTime)} for ${
                   session.durationMinutes || 0
-                } minutes`
+                } minutes, status ${session.status || "planned"}`
             )
             .join(". ");
 
@@ -453,7 +617,10 @@ export default function AlexaStudyAssistant({ onNavigate, onDataChange }) {
         /\b(data|dashboard|subjects|sessions)\b/.test(lower)
       ) {
         await loadData();
-        addMessage("assistant", "I've refreshed your subjects and study sessions.");
+        addMessage(
+          "assistant",
+          "I've refreshed your subjects and study sessions."
+        );
         return;
       }
 
@@ -474,7 +641,6 @@ export default function AlexaStudyAssistant({ onNavigate, onDataChange }) {
         const response = await fetch(`${API_URL}/ai/chat`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          // The backend ai.js expects the field named "message".
           body: JSON.stringify({ message: text }),
         });
 
@@ -512,6 +678,7 @@ export default function AlexaStudyAssistant({ onNavigate, onDataChange }) {
     [
       addMessage,
       loadData,
+      markSessionCompleted,
       navigateTo,
       prepareSession,
       sessions,
@@ -522,13 +689,13 @@ export default function AlexaStudyAssistant({ onNavigate, onDataChange }) {
   const submitText = useCallback(
     async (value = input) => {
       const text = value.trim();
-      if (!text || loading || saving) return;
+      if (!text || loading || saving || busySessionId) return;
 
       setInput("");
       addMessage("user", text);
       await handleCommand(text);
     },
-    [addMessage, handleCommand, input, loading, saving]
+    [addMessage, busySessionId, handleCommand, input, loading, saving]
   );
 
   const startListening = useCallback(() => {
@@ -542,7 +709,7 @@ export default function AlexaStudyAssistant({ onNavigate, onDataChange }) {
       return;
     }
 
-    if (listening || loading || saving) return;
+    if (listening || loading || saving || busySessionId) return;
 
     recognitionRef.current?.abort();
     handlingSpeechRef.current = false;
@@ -615,7 +782,14 @@ export default function AlexaStudyAssistant({ onNavigate, onDataChange }) {
       setNotice("");
       setError("Couldn't start listening. Please try the microphone again.");
     }
-  }, [addMessage, handleCommand, listening, loading, saving]);
+  }, [
+    addMessage,
+    busySessionId,
+    handleCommand,
+    listening,
+    loading,
+    saving,
+  ]);
 
   const confirmSession = useCallback(async () => {
     if (saving || !proposal) return;
@@ -659,7 +833,10 @@ export default function AlexaStudyAssistant({ onNavigate, onDataChange }) {
 
       if (!response.ok) {
         throw new Error(
-          getErrorMessage(data, `Couldn't save the session (${response.status}).`)
+          getErrorMessage(
+            data,
+            `Couldn't save the session (${response.status}).`
+          )
         );
       }
 
@@ -675,12 +852,11 @@ export default function AlexaStudyAssistant({ onNavigate, onDataChange }) {
       await loadData();
       onDataChange?.();
 
-      const confirmation =
-        `Session saved successfully: ${
-          subject?.name || data.subjectName || "Study session"
-        }, ${formatDate(savedDate)} at ${formatTime(
-          savedTime
-        )}, ${savedDuration} minutes.`;
+      const confirmation = `Session saved successfully: ${
+        subject?.name || data.subjectName || "Study session"
+      }, ${formatDate(savedDate)} at ${formatTime(
+        savedTime
+      )}, ${savedDuration} minutes.`;
 
       setNotice(confirmation);
       addMessage("assistant", confirmation);
@@ -704,6 +880,7 @@ export default function AlexaStudyAssistant({ onNavigate, onDataChange }) {
     "Open the study planner",
     "Show my subjects",
     "Show my study sessions",
+    "Mark my Data Structures session as completed",
     "Schedule a 30-minute session for tomorrow",
     "Explain cloud computing simply",
   ];
@@ -719,9 +896,9 @@ export default function AlexaStudyAssistant({ onNavigate, onDataChange }) {
         </div>
 
         <p className="panel-description">
-          Speak naturally. Supported commands can open pages and read your
-          study data. Scheduling requires your confirmation, while general
-          questions use your existing AI backend.
+          Speak naturally. Supported commands can open pages, read your study
+          data, and mark a matching session completed. Scheduling requires
+          your confirmation, while general questions use your existing AI backend.
         </p>
 
         <div className="voice-stat-grid">
@@ -740,13 +917,15 @@ export default function AlexaStudyAssistant({ onNavigate, onDataChange }) {
             <strong>
               {saving
                 ? "Saving…"
-                : loading
-                  ? "Thinking…"
-                  : listening
-                    ? "Listening…"
-                    : speaking
-                      ? "Speaking…"
-                      : "Ready"}
+                : busySessionId
+                  ? "Updating…"
+                  : loading
+                    ? "Thinking…"
+                    : listening
+                      ? "Listening…"
+                      : speaking
+                        ? "Speaking…"
+                        : "Ready"}
             </strong>
           </div>
         </div>
@@ -844,8 +1023,12 @@ export default function AlexaStudyAssistant({ onNavigate, onDataChange }) {
             </div>
           ))}
 
-          {loading && (
-            <div className="panel-description">StudyPilot is thinking…</div>
+          {(loading || busySessionId) && (
+            <div className="panel-description">
+              {busySessionId
+                ? "Updating your study session…"
+                : "StudyPilot is thinking…"}
+            </div>
           )}
         </div>
 
@@ -861,7 +1044,7 @@ export default function AlexaStudyAssistant({ onNavigate, onDataChange }) {
             value={input}
             onChange={(event) => setInput(event.target.value)}
             placeholder="Say or type a command…"
-            disabled={loading || saving}
+            disabled={loading || saving || Boolean(busySessionId)}
           />
 
           <button
@@ -874,7 +1057,7 @@ export default function AlexaStudyAssistant({ onNavigate, onDataChange }) {
                 startListening();
               }
             }}
-            disabled={loading || saving}
+            disabled={loading || saving || Boolean(busySessionId)}
             title={listening ? "Stop listening" : "Start voice input"}
           >
             {listening ? "Stop" : "Mic"}
@@ -883,7 +1066,9 @@ export default function AlexaStudyAssistant({ onNavigate, onDataChange }) {
           <button
             type="submit"
             className="voice-send-button"
-            disabled={!input.trim() || loading || saving}
+            disabled={
+              !input.trim() || loading || saving || Boolean(busySessionId)
+            }
           >
             Send
           </button>
@@ -1034,7 +1219,7 @@ export default function AlexaStudyAssistant({ onNavigate, onDataChange }) {
               className="voice-suggestion"
               key={suggestion}
               onClick={() => submitText(suggestion)}
-              disabled={loading || saving}
+              disabled={loading || saving || Boolean(busySessionId)}
             >
               {suggestion}
             </button>
@@ -1044,3 +1229,4 @@ export default function AlexaStudyAssistant({ onNavigate, onDataChange }) {
     </div>
   );
 }
+```
