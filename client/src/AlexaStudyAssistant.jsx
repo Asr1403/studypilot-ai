@@ -1,5 +1,6 @@
 
 import React, { useCallback, useEffect, useRef, useState } from "react";
+import "./AlexaStudyAssistant.css";
 
 const API_URL = "http://localhost:3000/api";
 
@@ -13,26 +14,31 @@ const PAGE_COMMANDS = [
   { page: "voice", names: ["voice coach", "voice coaching"] },
 ];
 
-function getTomorrowDate(offset = 1) {
+const INITIAL_MESSAGE = {
+  role: "assistant",
+  text: "Hi! I'm your StudyPilot assistant. Ask me a question, open a page, check your study sessions, or ask me to schedule a session. I'll ask you to confirm before saving a session.",
+};
+
+function localDate(offset = 0) {
   const date = new Date();
   date.setDate(date.getDate() + offset);
-  const year = date.getFullYear();
-  const month = String(date.getMonth() + 1).padStart(2, "0");
-  const day = String(date.getDate()).padStart(2, "0");
-  return `${year}-${month}-${day}`;
+
+  return [
+    date.getFullYear(),
+    String(date.getMonth() + 1).padStart(2, "0"),
+    String(date.getDate()).padStart(2, "0"),
+  ].join("-");
 }
 
 function parseDate(text) {
   const value = text.toLowerCase();
 
-  if (value.includes("day after tomorrow")) return getTomorrowDate(2);
-  if (value.includes("tomorrow")) return getTomorrowDate(1);
-  if (value.includes("today")) return getTomorrowDate(0);
+  if (value.includes("day after tomorrow")) return localDate(2);
+  if (value.includes("tomorrow")) return localDate(1);
+  if (value.includes("today")) return localDate(0);
 
-  const explicit = value.match(/\b(\d{4}-\d{2}-\d{2})\b/);
-  if (explicit) return explicit[1];
-
-  return getTomorrowDate(1);
+  const match = value.match(/\b(\d{4}-\d{2}-\d{2})\b/);
+  return match ? match[1] : localDate(1);
 }
 
 function parseDuration(text) {
@@ -50,27 +56,42 @@ function parseDuration(text) {
 function parseStartTime(text) {
   const value = text.toLowerCase();
 
-  const match = value.match(
+  const meridiemMatch = value.match(
     /\b(?:at\s*)?(\d{1,2})(?::(\d{2}))?\s*(a\.?m\.?|p\.?m\.?)\b/i
   );
 
-  if (!match) return "18:00";
+  if (meridiemMatch) {
+    let hour = Number(meridiemMatch[1]);
+    const minute = Number(meridiemMatch[2] || 0);
+    const suffix = meridiemMatch[3].replace(/\./g, "").toLowerCase();
 
-  let hour = Number(match[1]);
-  const minute = Number(match[2] || 0);
-  const meridiem = match[3].replace(/\./g, "").toLowerCase();
+    if (hour < 1 || hour > 12 || minute > 59) return "18:00";
 
-  if (hour < 1 || hour > 12 || minute > 59) return "18:00";
+    if (suffix === "pm" && hour !== 12) hour += 12;
+    if (suffix === "am" && hour === 12) hour = 0;
 
-  if (meridiem === "pm" && hour !== 12) hour += 12;
-  if (meridiem === "am" && hour === 12) hour = 0;
+    return `${String(hour).padStart(2, "0")}:${String(minute).padStart(2, "0")}`;
+  }
 
-  return `${String(hour).padStart(2, "0")}:${String(minute).padStart(2, "0")}`;
+  const twentyFourHour = value.match(/\bat\s+(\d{1,2}):(\d{2})\b/);
+
+  if (twentyFourHour) {
+    const hour = Number(twentyFourHour[1]);
+    const minute = Number(twentyFourHour[2]);
+
+    if (hour >= 0 && hour <= 23 && minute >= 0 && minute <= 59) {
+      return `${String(hour).padStart(2, "0")}:${String(minute).padStart(2, "0")}`;
+    }
+  }
+
+  return "18:00";
 }
 
 function formatDate(date) {
   if (!date) return "";
+
   const parsed = new Date(`${date}T12:00:00`);
+
   return Number.isNaN(parsed.getTime())
     ? date
     : parsed.toLocaleDateString("en-IN", {
@@ -80,22 +101,82 @@ function formatDate(date) {
       });
 }
 
+function formatTime(time) {
+  if (!time || !/^\d{2}:\d{2}$/.test(time)) return time || "6:00 PM";
+
+  const [hour, minute] = time.split(":").map(Number);
+
+  return new Date(2000, 0, 1, hour, minute).toLocaleTimeString("en-IN", {
+    hour: "numeric",
+    minute: "2-digit",
+    hour12: true,
+  });
+}
+
 function getErrorMessage(data, fallback) {
   return data?.message || data?.error || fallback;
 }
 
-export default function AlexaStudyAssistant({
-  onNavigate,
-  onDataChange,
-}) {
+function getSubjectId(subject) {
+  return subject?._id || subject?.id || "";
+}
+
+function getSessionSubject(session, subjects) {
+  if (session.subjectName) return session.subjectName;
+
+  return (
+    subjects.find(
+      (subject) => getSubjectId(subject) === String(session.subjectId || "")
+    )?.name || "Study session"
+  );
+}
+
+function detectPageCommand(text) {
+  const value = text
+    .toLowerCase()
+    .replace(/[?!.,]+$/g, "")
+    .trim();
+
+  return PAGE_COMMANDS.find((item) =>
+    item.names.some((name) => {
+      const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+      return new RegExp(
+        `\\b(?:open|go to|show|take me to|navigate to|visit)\\s+(?:the\\s+)?${escaped}\\b`,
+        "i"
+      ).test(value);
+    })
+  );
+}
+
+function isScheduleRequest(text) {
+  const value = text.toLowerCase();
+
+  const explicitAction =
+    /\b(schedule|book|create|add|arrange|set up|plan)\b/.test(value);
+
+  const studyContext =
+    /\b(study|studying|session|study block|revision|revise|practice)\b/.test(
+      value
+    );
+
+  const timeContext =
+    /\b(today|tomorrow|day after tomorrow|minutes?|mins?|hours?|hrs?|at\s+\d{1,2})\b/.test(
+      value
+    );
+
+  // Supports both "schedule a session tomorrow" and
+  // "I want to study cybersecurity tomorrow at 7".
+  return (
+    (explicitAction && (studyContext || timeContext)) ||
+    (studyContext && timeContext)
+  );
+}
+
+export default function AlexaStudyAssistant({ onNavigate, onDataChange }) {
   const [subjects, setSubjects] = useState([]);
   const [sessions, setSessions] = useState([]);
-  const [messages, setMessages] = useState([
-    {
-      role: "assistant",
-      text: "Hi! I'm your StudyPilot assistant. You can ask a question, open a page, check your study sessions, or ask me to prepare a study session for your confirmation.",
-    },
-  ]);
+  const [messages, setMessages] = useState([INITIAL_MESSAGE]);
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
   const [listening, setListening] = useState(false);
@@ -107,11 +188,13 @@ export default function AlexaStudyAssistant({
 
   const recognitionRef = useRef(null);
   const transcriptRef = useRef("");
-  const mountedRef = useRef(true);
+  const requestIdRef = useRef(0);
+  const mountedRef = useRef(false);
+  const handlingSpeechRef = useRef(false);
 
   const [form, setForm] = useState({
     subjectId: "",
-    date: getTomorrowDate(1),
+    date: localDate(1),
     startTime: "18:00",
     durationMinutes: 30,
   });
@@ -128,7 +211,7 @@ export default function AlexaStudyAssistant({
       ]);
 
       if (!subjectsResponse.ok || !sessionsResponse.ok) {
-        throw new Error("Could not load your subjects and study sessions.");
+        throw new Error("Could not load subjects and study sessions. Check that the backend is running.");
       }
 
       const subjectsData = await subjectsResponse.json();
@@ -147,9 +230,7 @@ export default function AlexaStudyAssistant({
         ...previous,
         subjectId:
           previous.subjectId ||
-          subjectsData[0]?._id ||
-          subjectsData[0]?.id ||
-          "",
+          getSubjectId(subjectsData[0]),
       }));
     } catch (err) {
       if (mountedRef.current) {
@@ -207,7 +288,7 @@ export default function AlexaStudyAssistant({
       if (!subjects.length) {
         addMessage(
           "assistant",
-          "You need to add a subject before scheduling a session. Open My Subjects and add one first."
+          "You need to add a subject before scheduling. Open My Subjects and add one first."
         );
         setNotice("Add a subject before scheduling.");
         return;
@@ -215,42 +296,47 @@ export default function AlexaStudyAssistant({
 
       const lower = text.toLowerCase();
 
-      const matchedSubject = subjects.find((subject) =>
-        lower.includes(String(subject.name || "").toLowerCase())
-      );
+      const matchedSubject = subjects.find((subject) => {
+        const name = String(subject.name || "").trim().toLowerCase();
+        return name.length > 0 && lower.includes(name);
+      });
 
-      const subjectId =
-        matchedSubject?._id ||
-        matchedSubject?.id ||
-        subjects[0]?._id ||
-        subjects[0]?.id ||
-        "";
+      const selectedSubjectId =
+        getSubjectId(matchedSubject) || getSubjectId(subjects[0]);
 
       const duration = parseDuration(text);
 
-      if (duration < 15 || duration > 600) {
+      if (!Number.isInteger(duration) || duration < 15 || duration > 600) {
         addMessage(
           "assistant",
-          "Study sessions must be between 15 and 600 minutes. Please say a valid duration."
+          "Study sessions must be between 15 and 600 minutes. Please try a valid duration."
         );
         return;
       }
 
-      const proposalForm = {
-        subjectId,
+      const nextForm = {
+        subjectId: selectedSubjectId,
         date: parseDate(text),
         startTime: parseStartTime(text),
         durationMinutes: duration,
       };
 
-      setForm(proposalForm);
+      setForm(nextForm);
       setProposal({ originalRequest: text });
       setNotice("");
       setError("");
 
+      const selectedName =
+        matchedSubject?.name ||
+        subjects.find((subject) => getSubjectId(subject) === selectedSubjectId)?.name;
+
+      const subjectMessage = matchedSubject
+        ? `I've prepared a session for ${selectedName}.`
+        : `I couldn't identify the subject from your request, so I've selected ${selectedName || "the first subject"} as a starting point. Please check or change it below.`;
+
       addMessage(
         "assistant",
-        `I've prepared a session for ${matchedSubject?.name || subjects[0]?.name || "your subject"}. Please review the subject, date, time and duration below. Nothing has been saved yet.`
+        `${subjectMessage} The default time is 6:00 PM and the default duration is 30 minutes unless you specified otherwise. Review the details below. Nothing has been saved yet.`
       );
     },
     [addMessage, subjects]
@@ -266,51 +352,34 @@ export default function AlexaStudyAssistant({
       setError("");
       setNotice("");
 
-      // Open pages directly rather than asking the AI to interpret navigation.
-      const pageCommand = PAGE_COMMANDS.find((item) =>
-        item.names.some((name) => {
-          const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-          return new RegExp(
-            `\\b(?:open|go to|show|take me to|navigate to|visit)\\s+(?:the\\s+)?${escaped}\\b`,
-            "i"
-          ).test(lower);
-        })
-      );
+      const pageCommand = detectPageCommand(lower);
 
       if (pageCommand) {
         navigateTo(pageCommand.page, `Opening ${pageCommand.names[0]}.`);
         return;
       }
 
-      // Read subjects from the backend.
       if (
-        /\b(list|show|read|tell me|what are)\b/.test(lower) &&
+        /\b(list|show|read|tell me|what are|which are)\b/.test(lower) &&
         /\b(subjects|my subjects)\b/.test(lower)
       ) {
         if (!subjects.length) {
-          addMessage("assistant", "You haven't added any subjects yet.");
+          addMessage("assistant", "You haven't added any subjects yet. Open My Subjects to add one.");
         } else {
           addMessage(
             "assistant",
-            `Your subjects are: ${subjects
-              .map((subject) => subject.name)
-              .filter(Boolean)
-              .join(", ")}.`
+            `Your subjects are: ${subjects.map((subject) => subject.name).filter(Boolean).join(", ")}.`
           );
         }
         return;
       }
 
-      // Summarize sessions using the current backend data.
       if (
-        /\b(show|list|check|what are|tell me|read)\b/.test(lower) &&
+        /\b(show|list|check|what are|tell me|read|when is|when are)\b/.test(lower) &&
         /\b(sessions|study sessions|study schedule|my schedule|upcoming sessions)\b/.test(lower)
       ) {
         if (!sessions.length) {
-          addMessage(
-            "assistant",
-            "You don't have any study sessions saved yet. Ask me to schedule one."
-          );
+          addMessage("assistant", "You don't have any study sessions saved yet. Ask me to schedule one.");
         } else {
           const upcoming = [...sessions]
             .sort((a, b) =>
@@ -321,19 +390,10 @@ export default function AlexaStudyAssistant({
             .slice(0, 8);
 
           const summary = upcoming
-            .map((session) => {
-              const subject =
-                session.subjectName ||
-                subjects.find(
-                  (item) =>
-                    (item._id || item.id) === session.subjectId
-                )?.name ||
-                "Study session";
-
-              return `${subject} on ${formatDate(session.date)} at ${
-                session.startTime || "an unspecified time"
-              } for ${session.durationMinutes || 0} minutes`;
-            })
+            .map(
+              (session) =>
+                `${getSessionSubject(session, subjects)} on ${formatDate(session.date)} at ${formatTime(session.startTime)} for ${session.durationMinutes || 0} minutes`
+            )
             .join(". ");
 
           addMessage("assistant", `Here are your saved sessions: ${summary}.`);
@@ -341,26 +401,29 @@ export default function AlexaStudyAssistant({
         return;
       }
 
-      // Schedule requests must become a reviewable proposal.
-      const schedulingIntent =
-        /\b(schedule|create|book|add|plan|set up|arrange)\b/.test(lower) &&
-        /\b(session|study|studying|block|minutes?|mins?|hours?|hrs?|tomorrow|today)\b/.test(
-          lower
-        );
-
-      if (schedulingIntent) {
+      if (isScheduleRequest(text)) {
         prepareSession(text);
         return;
       }
 
-      // Refresh local data on request.
-      if (/\b(refresh|reload|update)\b/.test(lower) && /\b(data|dashboard|subjects|sessions)\b/.test(lower)) {
+      if (
+        /\b(refresh|reload|update)\b/.test(lower) &&
+        /\b(data|dashboard|subjects|sessions)\b/.test(lower)
+      ) {
         await loadData();
         addMessage("assistant", "I've refreshed your subjects and study sessions.");
         return;
       }
 
-      // General questions use the existing backend Groq integration.
+      if (/\b(clear|reset)\b/.test(lower) && /\bconversation|chat|messages\b/.test(lower)) {
+        setMessages([INITIAL_MESSAGE]);
+        setProposal(null);
+        addMessage("assistant", "I've cleared the conversation.");
+        return;
+      }
+
+      // All other questions use the existing Groq-enabled backend.
+      const requestId = ++requestIdRef.current;
       setLoading(true);
 
       try {
@@ -373,7 +436,7 @@ export default function AlexaStudyAssistant({
               app: "StudyPilot AI",
               subjects: subjects.map((subject) => subject.name),
               sessions: sessions.slice(0, 20).map((session) => ({
-                subjectName: session.subjectName,
+                subjectName: getSessionSubject(session, subjects),
                 subjectId: session.subjectId,
                 date: session.date,
                 startTime: session.startTime,
@@ -387,9 +450,7 @@ export default function AlexaStudyAssistant({
         const data = await response.json().catch(() => ({}));
 
         if (!response.ok) {
-          throw new Error(
-            getErrorMessage(data, `AI request failed (${response.status}).`)
-          );
+          throw new Error(getErrorMessage(data, `AI request failed (${response.status}).`));
         }
 
         const answer = data.answer || data.message;
@@ -398,25 +459,24 @@ export default function AlexaStudyAssistant({
           throw new Error("The AI endpoint returned no answer.");
         }
 
-        addMessage("assistant", answer);
+        if (mountedRef.current && requestId === requestIdRef.current) {
+          addMessage("assistant", answer);
+        }
       } catch (err) {
-        setError(err.message || "Could not get an AI response.");
-        addMessage(
-          "assistant",
-          "I couldn't reach the AI service just now. Your microphone is working, but please check the backend terminal and the /api/ai/chat request."
-        );
+        if (mountedRef.current && requestId === requestIdRef.current) {
+          setError(err.message || "Could not get an AI response.");
+          addMessage(
+            "assistant",
+            "I couldn't reach the AI service. Please check the backend terminal and the /api/ai/chat request."
+          );
+        }
       } finally {
-        setLoading(false);
+        if (mountedRef.current && requestId === requestIdRef.current) {
+          setLoading(false);
+        }
       }
     },
-    [
-      addMessage,
-      loadData,
-      navigateTo,
-      prepareSession,
-      sessions,
-      subjects,
-    ]
+    [addMessage, loadData, navigateTo, prepareSession, sessions, subjects]
   );
 
   const submitText = useCallback(
@@ -436,13 +496,15 @@ export default function AlexaStudyAssistant({
       window.SpeechRecognition || window.webkitSpeechRecognition;
 
     if (!SpeechRecognition) {
-      setError(
-        "Speech recognition isn't supported here. Use the latest Google Chrome and allow microphone access."
-      );
+      setError("Speech recognition isn't supported here. Use the latest Google Chrome and allow microphone access.");
       return;
     }
 
+    if (listening || loading || saving) return;
+
     recognitionRef.current?.abort();
+    handlingSpeechRef.current = false;
+    transcriptRef.current = "";
 
     const recognition = new SpeechRecognition();
     recognition.lang = "en-IN";
@@ -450,7 +512,6 @@ export default function AlexaStudyAssistant({
     recognition.interimResults = true;
     recognition.maxAlternatives = 1;
 
-    transcriptRef.current = "";
     setListening(true);
     setError("");
     setNotice("Listening… speak now.");
@@ -470,12 +531,10 @@ export default function AlexaStudyAssistant({
       }
 
       if (finalTranscript.trim()) {
-        transcriptRef.current += ` ${finalTranscript.trim()}`;
+        transcriptRef.current = `${transcriptRef.current} ${finalTranscript.trim()}`.trim();
       }
 
-      setInput(
-        `${transcriptRef.current} ${interimTranscript}`.trim()
-      );
+      setInput(`${transcriptRef.current} ${interimTranscript}`.trim());
     };
 
     recognition.onerror = (event) => {
@@ -493,11 +552,13 @@ export default function AlexaStudyAssistant({
 
       const transcript = transcriptRef.current.trim();
 
-      // Process only the final recognized transcript.
-      if (transcript) {
+      if (transcript && !handlingSpeechRef.current) {
+        handlingSpeechRef.current = true;
         setInput("");
         addMessage("user", transcript);
-        handleCommand(transcript);
+        handleCommand(transcript).finally(() => {
+          handlingSpeechRef.current = false;
+        });
       }
     };
 
@@ -507,9 +568,10 @@ export default function AlexaStudyAssistant({
       recognition.start();
     } catch {
       setListening(false);
+      setNotice("");
       setError("Couldn't start listening. Please try the microphone again.");
     }
-  }, [addMessage, handleCommand]);
+  }, [addMessage, handleCommand, listening, loading, saving]);
 
   const confirmSession = useCallback(async () => {
     if (saving || !proposal) return;
@@ -552,16 +614,11 @@ export default function AlexaStudyAssistant({
       const data = await response.json().catch(() => ({}));
 
       if (!response.ok) {
-        throw new Error(
-          getErrorMessage(
-            data,
-            `Couldn't save the session (${response.status}).`
-          )
-        );
+        throw new Error(getErrorMessage(data, `Couldn't save the session (${response.status}).`));
       }
 
       const subject = subjects.find(
-        (item) => (item._id || item.id) === form.subjectId
+        (item) => getSubjectId(item) === form.subjectId
       );
 
       setProposal(null);
@@ -570,34 +627,23 @@ export default function AlexaStudyAssistant({
 
       const confirmation =
         `Session saved successfully: ${subject?.name || data.subjectName || "Study session"}, ` +
-        `${formatDate(form.date)} at ${form.startTime}, ` +
+        `${formatDate(form.date)} at ${formatTime(form.startTime)}, ` +
         `${Number(form.durationMinutes)} minutes.`;
 
       setNotice(confirmation);
       addMessage("assistant", confirmation);
     } catch (err) {
-      setError(
-        err.message ||
-          "The session couldn't be saved. Check the backend terminal for details."
-      );
+      setError(err.message || "The session couldn't be saved. Check the backend terminal.");
     } finally {
       setSaving(false);
     }
-  }, [
-    addMessage,
-    form,
-    loadData,
-    onDataChange,
-    proposal,
-    saving,
-    subjects,
-  ]);
+  }, [addMessage, form, loadData, onDataChange, proposal, saving, subjects]);
 
-  const cancelProposal = () => {
+  const cancelProposal = useCallback(() => {
     setProposal(null);
     setNotice("Scheduling cancelled. No session was saved.");
     addMessage("assistant", "No problem. I cancelled the proposed session.");
-  };
+  }, [addMessage]);
 
   const suggestions = [
     "Open the study planner",
@@ -611,14 +657,16 @@ export default function AlexaStudyAssistant({
     <div className="voice-page">
       <div className="panel" style={{ marginBottom: 20 }}>
         <div className="section-eyebrow">STUDYPILOT AI</div>
+
         <div className="panel-heading">
           <h2>Study Assistant</h2>
           <span className="badge">Voice + AI</span>
         </div>
+
         <p className="panel-description">
-          Speak naturally. Supported commands perform actions, scheduling
-          requires your confirmation, and general questions use your existing
-          AI backend.
+          Speak naturally. Supported commands can open pages and read your
+          study data. Scheduling requires your confirmation, while general
+          questions use your existing AI backend.
         </p>
 
         <div className="voice-stat-grid">
@@ -632,7 +680,9 @@ export default function AlexaStudyAssistant({
           </div>
           <div className="voice-stat-card">
             <span>Assistant</span>
-            <strong>{loading ? "Thinking…" : listening ? "Listening…" : "Ready"}</strong>
+            <strong>
+              {saving ? "Saving…" : loading ? "Thinking…" : listening ? "Listening…" : speaking ? "Speaking…" : "Ready"}
+            </strong>
           </div>
         </div>
 
@@ -656,10 +706,11 @@ export default function AlexaStudyAssistant({
             type="button"
             className="icon-button"
             onClick={() => {
-              setMessages([]);
+              setMessages([INITIAL_MESSAGE]);
               setError("");
               setNotice("");
               setProposal(null);
+              setInput("");
             }}
             title="Clear conversation"
           >
@@ -672,9 +723,10 @@ export default function AlexaStudyAssistant({
           style={{
             display: "flex",
             flexDirection: "column",
-            gap: 12,
-            maxHeight: 400,
+            gap: 14,
+            maxHeight: 440,
             overflowY: "auto",
+            overflowX: "hidden",
             padding: "8px 2px",
           }}
         >
@@ -682,16 +734,17 @@ export default function AlexaStudyAssistant({
             <div
               key={`${index}-${message.role}`}
               style={{
-                alignSelf:
-                  message.role === "user" ? "flex-end" : "flex-start",
-                maxWidth: "90%",
-                padding: "12px 14px",
-                borderRadius: 14,
+                alignSelf: message.role === "user" ? "flex-end" : "flex-start",
+                maxWidth: "88%",
+                minWidth: 0,
+                padding: "14px 16px",
+                borderRadius: 16,
                 background:
                   message.role === "user"
                     ? "rgba(124, 92, 255, 0.22)"
                     : "rgba(255,255,255,0.055)",
-                border: "1px solid rgba(255,255,255,0.08)",
+                border: "1px solid rgba(167,139,250,0.14)",
+                lineHeight: 1.65,
                 whiteSpace: "pre-wrap",
                 overflowWrap: "anywhere",
               }}
@@ -700,15 +753,18 @@ export default function AlexaStudyAssistant({
                 style={{
                   fontSize: 11,
                   opacity: 0.7,
-                  marginBottom: 5,
+                  marginBottom: 6,
                   textTransform: "uppercase",
+                  letterSpacing: "0.08em",
                 }}
               >
                 {message.role === "user" ? "You" : "StudyPilot"}
               </div>
-              {message.text}
+
+              <div>{message.text}</div>
+
               {message.role === "assistant" && (
-                <div style={{ marginTop: 8 }}>
+                <div style={{ marginTop: 10 }}>
                   <button
                     type="button"
                     className="icon-button"
@@ -744,7 +800,13 @@ export default function AlexaStudyAssistant({
           <button
             type="button"
             className="voice-mic-button"
-            onClick={listening ? () => recognitionRef.current?.stop() : startListening}
+            onClick={() => {
+              if (listening) {
+                recognitionRef.current?.stop();
+              } else {
+                startListening();
+              }
+            }}
             disabled={loading || saving}
             title={listening ? "Stop listening" : "Start voice input"}
           >
@@ -762,7 +824,7 @@ export default function AlexaStudyAssistant({
 
         <div className="panel-description" style={{ marginTop: 10 }}>
           {listening
-            ? "Listening now. Your final recognized sentence will be processed automatically."
+            ? "Listening now. Your recognized sentence will be processed when you finish speaking."
             : speaking
               ? "Speaking the selected response."
               : "You can also type a command and press Send."}
@@ -772,17 +834,19 @@ export default function AlexaStudyAssistant({
       {proposal && (
         <div className="panel" style={{ marginBottom: 20 }}>
           <div className="section-eyebrow">REVIEW BEFORE SAVING</div>
+
           <div className="panel-heading">
             <h3>Proposed study session</h3>
           </div>
+
           <p className="panel-description">
-            Check these details carefully. The session will not be saved until
-            you select Confirm and schedule.
+            Review each field. Nothing will be saved until you select
+            Confirm and schedule.
           </p>
 
-          <div style={{ display: "grid", gap: 14 }}>
+          <div style={{ display: "grid", gap: 16 }}>
             <label>
-              <span style={{ display: "block", marginBottom: 6 }}>Subject</span>
+              <span style={{ display: "block", marginBottom: 7 }}>Subject</span>
               <select
                 value={form.subjectId}
                 onChange={(event) =>
@@ -791,12 +855,11 @@ export default function AlexaStudyAssistant({
                     subjectId: event.target.value,
                   }))
                 }
-                style={{ width: "100%", padding: 10 }}
               >
                 {subjects.map((subject) => (
                   <option
-                    key={subject._id || subject.id}
-                    value={subject._id || subject.id}
+                    key={getSubjectId(subject)}
+                    value={getSubjectId(subject)}
                   >
                     {subject.name}
                   </option>
@@ -805,22 +868,22 @@ export default function AlexaStudyAssistant({
             </label>
 
             <label>
-              <span style={{ display: "block", marginBottom: 6 }}>Date</span>
+              <span style={{ display: "block", marginBottom: 7 }}>Date</span>
               <input
                 type="date"
                 value={form.date}
+                min={localDate(0)}
                 onChange={(event) =>
                   setForm((previous) => ({
                     ...previous,
                     date: event.target.value,
                   }))
                 }
-                style={{ width: "100%", padding: 10 }}
               />
             </label>
 
             <label>
-              <span style={{ display: "block", marginBottom: 6 }}>Start time</span>
+              <span style={{ display: "block", marginBottom: 7 }}>Start time</span>
               <input
                 type="time"
                 value={form.startTime}
@@ -830,12 +893,11 @@ export default function AlexaStudyAssistant({
                     startTime: event.target.value,
                   }))
                 }
-                style={{ width: "100%", padding: 10 }}
               />
             </label>
 
             <label>
-              <span style={{ display: "block", marginBottom: 6 }}>
+              <span style={{ display: "block", marginBottom: 7 }}>
                 Duration in minutes
               </span>
               <input
@@ -850,17 +912,15 @@ export default function AlexaStudyAssistant({
                     durationMinutes: event.target.value,
                   }))
                 }
-                style={{ width: "100%", padding: 10 }}
               />
             </label>
 
             <div className="panel-description">
-              Summary:{" "}
+              <strong>Summary:</strong>{" "}
               {subjects.find(
-                (subject) =>
-                  (subject._id || subject.id) === form.subjectId
+                (subject) => getSubjectId(subject) === form.subjectId
               )?.name || "Choose a subject"}{" "}
-              · {formatDate(form.date)} · {form.startTime} ·{" "}
+              · {formatDate(form.date)} · {formatTime(form.startTime)} ·{" "}
               {form.durationMinutes} minutes
             </div>
 
@@ -873,6 +933,7 @@ export default function AlexaStudyAssistant({
               >
                 {saving ? "Saving…" : "Confirm and schedule"}
               </button>
+
               <button
                 type="button"
                 className="icon-button"
@@ -890,6 +951,7 @@ export default function AlexaStudyAssistant({
         <div className="panel-heading">
           <h3>Try saying</h3>
         </div>
+
         <div className="voice-suggestions">
           {suggestions.map((suggestion) => (
             <button
