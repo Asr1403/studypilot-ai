@@ -1,0 +1,421 @@
+
+/* StudyPilot AI — Study Assistant UI improvements */
+
+.voice-page {
+  width: 100%;
+  max-width: 1100px;
+  min-width: 0;
+  margin: 0 auto;
+  padding: 20px;
+  box-sizing: border-box;
+  color: #f3f2ff;
+}
+
+.voice-page *,
+.voice-page *::before,
+.voice-page *::after {
+  box-sizing: border-box;
+}
+
+.voice-page .panel {
+  width: 100%;
+  min-width: 0;
+  padding: 24px;
+  border: 1px solid rgba(167, 139, 250, 0.15);
+  border-radius: 20px;
+  background: linear-gradient(
+    145deg,
+    rgba(28, 31, 51, 0.98),
+    rgba(15, 17, 32, 0.98)
+  );
+  box-shadow: 0 10px 35px rgba(0, 0, 0, 0.12);
+}
+
+.voice-page .panel-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 12px;
+  min-width: 0;
+  margin-bottom: 14px;
+}
+
+.voice-page .panel-heading h2,
+.voice-page .panel-heading h3 {
+  min-width: 0;
+  margin: 0;
+  color: #f5f3ff;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+
+.voice-page .panel-heading h2 {
+  font-size: clamp(22px, 3vw, 29px);
+  font-weight: 750;
+}
+
+.voice-page .panel-heading h3 {
+  font-size: 19px;
+  font-weight: 700;
+}
+
+.voice-page .section-eyebrow {
+  margin-bottom: 10px;
+  color: #b5a2ff;
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: 0.16em;
+}
+
+.voice-page .panel-description {
+  color: #a9aec8;
+  font-size: 14px;
+  line-height: 1.7;
+  overflow-wrap: anywhere;
+}
+
+.voice-page .voice-stat-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 14px;
+  margin-top: 24px;
+}
+
+.voice-page .voice-stat-card {
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+  min-width: 0;
+  padding: 18px;
+  border: 1px solid rgba(167, 139, 250, 0.14);
+  border-radius: 15px;
+  background: rgba(255, 255, 255, 0.035);
+}
+
+.voice-page .voice-stat-card span {
+  color: #a9aec8;
+  font-size: 13px;
+}
+
+.voice-page .voice-stat-card strong {
+  color: #f4f0ff;
+  font-size: 24px;
+  overflow-wrap: anywhere;
+}
+
+.voice-page .alert {
+  padding: 13px 15px;
+  border: 1px solid rgba(167, 139, 250, 0.2);
+  border-radius: 12px;
+  background: rgba(124, 92, 255, 0.09);
+  color: #e5ddff;
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+}
+
+/* Conversation area */
+
+.voice-page [aria-live="polite"] {
+  width: 100%;
+  min-width: 0;
+  max-height: 440px !important;
+  overflow-x: hidden !important;
+  overflow-y: auto !important;
+  padding: 12px 8px !important;
+  gap: 16px !important;
+  scrollbar-width: thin;
+  scrollbar-color: #51437c transparent;
+}
+
+.voice-page [aria-live="polite"] > div {
+  min-width: 0;
+  max-width: min(88%, 760px) !important;
+  padding: 16px 18px !important;
+  border: 1px solid rgba(167, 139, 250, 0.13) !important;
+  border-radius: 17px !important;
+  line-height: 1.65;
+  overflow-wrap: anywhere;
+  word-break: normal;
+}
+
+.voice-page [aria-live="polite"] > div > div:first-child {
+  color: #b6a9e9;
+  font-size: 10px !important;
+  font-weight: 750;
+  letter-spacing: 0.08em;
+}
+
+.voice-page [aria-live="polite"] > div[style*="flex-end"] {
+  background: rgba(105, 78, 211, 0.23) !important;
+  border-color: rgba(167, 139, 250, 0.23) !important;
+}
+
+.voice-page [aria-live="polite"] > div[style*="flex-start"] {
+  background: rgba(255, 255, 255, 0.045) !important;
+}
+
+/* Fix the Read aloud button wrapping letter by letter */
+
+.voice-page .icon-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  width: auto !important;
+  min-width: max-content !important;
+  max-width: 100%;
+  min-height: 38px;
+  padding: 8px 13px !important;
+  border: 1px solid rgba(167, 139, 250, 0.25);
+  border-radius: 10px;
+  background: rgba(124, 92, 255, 0.1);
+  color: #dcd3ff;
+  font-size: 13px;
+  line-height: 1.3;
+  white-space: nowrap !important;
+  word-break: normal !important;
+  overflow-wrap: normal !important;
+  cursor: pointer;
+}
+
+.voice-page .icon-button:hover {
+  background: rgba(124, 92, 255, 0.2);
+  border-color: rgba(167, 139, 250, 0.5);
+}
+
+/* Message input and controls */
+
+.voice-page .voice-composer {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  min-width: 0;
+  margin-top: 18px;
+  padding: 9px;
+  border: 1px solid rgba(167, 139, 250, 0.23);
+  border-radius: 16px;
+  background: rgba(10, 12, 26, 0.8);
+}
+
+.voice-page .voice-composer input {
+  width: 100%;
+  min-width: 0;
+  height: 44px;
+  padding: 0 12px;
+  border: none;
+  outline: none;
+  background: transparent;
+  color: #f5f3ff;
+  font: inherit;
+  font-size: 14px;
+}
+
+.voice-page .voice-composer input::placeholder {
+  color: #858ba9;
+}
+
+.voice-page .voice-composer input:focus-visible {
+  outline: 2px solid #8b70ff;
+  outline-offset: -2px;
+  border-radius: 8px;
+}
+
+.voice-page .voice-mic-button,
+.voice-page .voice-send-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  min-width: 66px;
+  min-height: 44px;
+  padding: 10px 15px;
+  border: 1px solid transparent;
+  border-radius: 12px;
+  font: inherit;
+  font-weight: 650;
+  font-size: 14px;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: background 160ms ease, transform 160ms ease;
+}
+
+.voice-page .voice-mic-button {
+  background: rgba(124, 92, 255, 0.13);
+  border-color: rgba(167, 139, 250, 0.22);
+  color: #d6caff;
+}
+
+.voice-page .voice-send-button {
+  background: linear-gradient(135deg, #8b5cf6, #6d4aff);
+  color: white;
+}
+
+.voice-page .voice-mic-button:hover,
+.voice-page .voice-send-button:hover {
+  transform: translateY(-1px);
+}
+
+.voice-page .voice-mic-button:disabled,
+.voice-page .voice-send-button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+  transform: none;
+}
+
+/* Suggestion chips */
+
+.voice-page .voice-suggestions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-top: 12px;
+}
+
+.voice-page .voice-suggestion {
+  max-width: 100%;
+  padding: 11px 15px;
+  border: 1px solid rgba(167, 139, 250, 0.2);
+  border-radius: 12px;
+  background: rgba(124, 92, 255, 0.08);
+  color: #dcd5ff;
+  font: inherit;
+  font-size: 13px;
+  line-height: 1.5;
+  text-align: left;
+  overflow-wrap: anywhere;
+  cursor: pointer;
+  transition: background 160ms ease, border-color 160ms ease;
+}
+
+.voice-page .voice-suggestion:hover {
+  background: rgba(124, 92, 255, 0.17);
+  border-color: rgba(167, 139, 250, 0.45);
+}
+
+.voice-page .voice-suggestion:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* Session proposal form */
+
+.voice-page label {
+  display: block;
+  min-width: 0;
+  color: #d8d6ed;
+  font-size: 14px;
+  font-weight: 550;
+}
+
+.voice-page select,
+.voice-page input[type="date"],
+.voice-page input[type="time"],
+.voice-page input[type="number"] {
+  width: 100%;
+  min-width: 0;
+  min-height: 44px;
+  padding: 10px 12px !important;
+  border: 1px solid rgba(167, 139, 250, 0.22);
+  border-radius: 10px;
+  background: #15172b;
+  color: #f4f1ff;
+  font: inherit;
+  color-scheme: dark;
+}
+
+.voice-page select:focus,
+.voice-page input:focus {
+  outline: 2px solid rgba(139, 112, 255, 0.7);
+  outline-offset: 1px;
+}
+
+/* Tablet */
+
+@media (max-width: 900px) {
+  .voice-page {
+    padding: 14px;
+  }
+
+  .voice-page .panel {
+    padding: 20px;
+  }
+
+  .voice-page [aria-live="polite"] > div {
+    max-width: 94% !important;
+  }
+}
+
+/* Mobile */
+
+@media (max-width: 560px) {
+  .voice-page {
+    padding: 10px;
+  }
+
+  .voice-page .panel {
+    padding: 16px;
+    border-radius: 15px;
+  }
+
+  .voice-page .voice-stat-grid {
+    grid-template-columns: 1fr;
+    gap: 10px;
+  }
+
+  .voice-page .voice-stat-card {
+    padding: 14px;
+  }
+
+  .voice-page .voice-stat-card strong {
+    font-size: 21px;
+  }
+
+  .voice-page [aria-live="polite"] {
+    max-height: 380px !important;
+    padding: 6px 2px !important;
+  }
+
+  .voice-page [aria-live="polite"] > div {
+    max-width: 100% !important;
+    padding: 13px !important;
+  }
+
+  .voice-page .voice-composer {
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 8px;
+    padding: 8px;
+  }
+
+  .voice-page .voice-composer input {
+    grid-column: 1 / -1;
+    grid-row: 1;
+  }
+
+  .voice-page .voice-mic-button {
+    grid-column: 1;
+    grid-row: 2;
+  }
+
+  .voice-page .voice-send-button {
+    grid-column: 2;
+    grid-row: 2;
+  }
+
+  .voice-page .voice-suggestions {
+    flex-direction: column;
+  }
+
+  .voice-page .voice-suggestion {
+    width: 100%;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .voice-page * {
+    scroll-behavior: auto !important;
+    transition: none !important;
+  }
+}
