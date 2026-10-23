@@ -41,12 +41,54 @@ const styles = {
   },
 };
 
-function formatDate(dateString) {
-  if (!dateString) return "Date not set";
+// Return a YYYY-MM-DD date without timezone-shifting date-only values.
+function getSessionDate(session) {
+  if (session?.date && /^\d{4}-\d{2}-\d{2}$/.test(session.date)) {
+    return session.date;
+  }
 
-  const date = new Date(dateString);
+  const value = session?.startTime;
+  if (!value) return "";
 
-  if (Number.isNaN(date.getTime())) return "Invalid date";
+  if (/^\d{4}-\d{2}-\d{2}T/.test(value)) {
+    return value.slice(0, 10);
+  }
+
+  return "";
+}
+
+// Existing database records store the time separately, e.g. "18:00".
+function getSessionTime(session) {
+  const value = session?.startTime;
+  if (!value) return "";
+
+  const match = String(value).match(/(?:T|\s)(\d{2}:\d{2})/);
+  if (match) return match[1];
+
+  if (/^\d{2}:\d{2}$/.test(String(value))) {
+    return value;
+  }
+
+  return "";
+}
+
+function formatDate(dateValue) {
+  if (!dateValue) return "Date not set";
+
+  const match = String(dateValue).match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  let date;
+
+  if (match) {
+    date = new Date(
+      Number(match[1]),
+      Number(match[2]) - 1,
+      Number(match[3])
+    );
+  } else {
+    date = new Date(dateValue);
+  }
+
+  if (Number.isNaN(date.getTime())) return "Date not set";
 
   return date.toLocaleDateString(undefined, {
     weekday: "short",
@@ -56,12 +98,14 @@ function formatDate(dateString) {
   });
 }
 
-function formatTime(dateString) {
-  if (!dateString) return "";
+function formatTime(timeValue) {
+  if (!timeValue) return "";
 
-  const date = new Date(dateString);
+  const match = String(timeValue).match(/^(\d{2}):(\d{2})$/);
+  if (!match) return "";
 
-  if (Number.isNaN(date.getTime())) return "";
+  const date = new Date();
+  date.setHours(Number(match[1]), Number(match[2]), 0, 0);
 
   return date.toLocaleTimeString(undefined, {
     hour: "2-digit",
@@ -70,7 +114,9 @@ function formatTime(dateString) {
 }
 
 function getSessionMinutes(session) {
-  const duration = Number(session?.duration);
+  const duration = Number(
+    session?.durationMinutes ?? session?.duration ?? 0
+  );
 
   return Number.isFinite(duration) && duration > 0 ? duration : 0;
 }
@@ -117,16 +163,12 @@ function StatusBadge({ status }) {
   );
 }
 
-function SessionCard({
-  session,
-  onComplete,
-  onMiss,
-  onDelete,
-  busy,
-}) {
+function SessionCard({ session, onComplete, onMiss, onDelete, busy }) {
   const completed = session.status === "completed";
   const missed = session.status === "missed";
   const subject = session.subjectName || session.subject || "Study session";
+  const date = getSessionDate(session);
+  const time = getSessionTime(session);
 
   return (
     <article
@@ -166,13 +208,8 @@ function SessionCard({
               lineHeight: 1.7,
             }}
           >
-            {formatDate(session.startTime)}
-            {session.startTime && (
-              <>
-                {" · "}
-                {formatTime(session.startTime)}
-              </>
-            )}
+            {formatDate(date)}
+            {time && <>{" · "}{formatTime(time)}</>}
           </p>
         </div>
 
@@ -190,11 +227,8 @@ function SessionCard({
         }}
       >
         <span>◷ {getSessionMinutes(session)} minutes</span>
-
         {completed && (
-          <span style={{ color: "#62dfb3" }}>
-            ✓ Focus time earned
-          </span>
+          <span style={{ color: "#62dfb3" }}>✓ Focus time earned</span>
         )}
       </div>
 
@@ -322,11 +356,11 @@ export default function StudyPlanner() {
 
   const sortedSessions = useMemo(
     () =>
-      [...sessions].sort(
-        (a, b) =>
-          new Date(a.startTime || 0).getTime() -
-          new Date(b.startTime || 0).getTime()
-      ),
+      [...sessions].sort((a, b) => {
+        const aValue = `${getSessionDate(a)}T${getSessionTime(a) || "00:00"}`;
+        const bValue = `${getSessionDate(b)}T${getSessionTime(b) || "00:00"}`;
+        return aValue.localeCompare(bValue);
+      }),
     [sessions]
   );
 
@@ -354,14 +388,35 @@ export default function StudyPlanner() {
       return;
     }
 
-    const startDate = new Date(form.startTime);
+    // datetime-local is normalized to YYYY-MM-DDTHH:mm.
+    const [date, time] = form.startTime.split("T");
 
-    if (Number.isNaN(startDate.getTime())) {
+    if (
+      !date ||
+      !/^\d{4}-\d{2}-\d{2}$/.test(date) ||
+      !time ||
+      !/^\d{2}:\d{2}$/.test(time)
+    ) {
+      setError("Please choose a valid date and time.");
+      return;
+    }
+
+    const [year, month, day] = date.split("-").map(Number);
+    const [hours, minutes] = time.split(":").map(Number);
+    const localDate = new Date(year, month - 1, day, hours, minutes);
+
+    if (
+      localDate.getFullYear() !== year ||
+      localDate.getMonth() !== month - 1 ||
+      localDate.getDate() !== day ||
+      localDate.getHours() !== hours ||
+      localDate.getMinutes() !== minutes
+    ) {
       setError("Please enter a valid date and time.");
       return;
     }
 
-    if (startDate.getTime() < Date.now()) {
+    if (localDate.getTime() < Date.now()) {
       setError("Choose a future date and time for your study session.");
       return;
     }
@@ -379,8 +434,9 @@ export default function StudyPlanner() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           subjectId: form.subjectId,
-          startTime: startDate.toISOString(),
-          duration: Number(form.duration),
+          date,
+          startTime: time,
+          durationMinutes: Number(form.duration),
         }),
       });
 
@@ -388,23 +444,16 @@ export default function StudyPlanner() {
 
       if (!response.ok) {
         throw new Error(
-          data.error ||
-            data.message ||
-            "Unable to create the study session."
+          data.error || data.message || "Unable to create the study session."
         );
       }
 
-      setForm((previous) => ({
-        ...previous,
-        startTime: "",
-      }));
-
+      setForm((previous) => ({ ...previous, startTime: "" }));
       setSuccess("Your study session has been scheduled.");
       await fetchData();
     } catch (err) {
       setError(
-        err.message ||
-          "Could not schedule the session. Please try again."
+        err.message || "Could not schedule the session. Please try again."
       );
     } finally {
       setSaving(false);
@@ -437,9 +486,7 @@ export default function StudyPlanner() {
 
       if (!response.ok) {
         throw new Error(
-          data.error ||
-            data.message ||
-            "Unable to update the session status."
+          data.error || data.message || "Unable to update the session status."
         );
       }
 
@@ -452,8 +499,7 @@ export default function StudyPlanner() {
       await fetchData();
     } catch (err) {
       setError(
-        err.message ||
-          "Could not update the session. Please try again."
+        err.message || "Could not update the session. Please try again."
       );
     } finally {
       setBusySessionId(null);
@@ -468,11 +514,13 @@ export default function StudyPlanner() {
       return;
     }
 
-    const confirmed = window.confirm(
-      "Delete this study session? This action cannot be undone."
-    );
-
-    if (!confirmed) return;
+    if (
+      !window.confirm(
+        "Delete this study session? This action cannot be undone."
+      )
+    ) {
+      return;
+    }
 
     setError("");
     setSuccess("");
@@ -488,9 +536,7 @@ export default function StudyPlanner() {
 
       if (!response.ok) {
         throw new Error(
-          data.error ||
-            data.message ||
-            "Unable to delete the session."
+          data.error || data.message || "Unable to delete the session."
         );
       }
 
@@ -498,13 +544,18 @@ export default function StudyPlanner() {
       await fetchData();
     } catch (err) {
       setError(
-        err.message ||
-          "Could not delete the session. Please try again."
+        err.message || "Could not delete the session. Please try again."
       );
     } finally {
       setBusySessionId(null);
     }
   };
+
+  const minimumDateTime = new Date(
+    Date.now() - new Date().getTimezoneOffset() * 60000
+  )
+    .toISOString()
+    .slice(0, 16);
 
   return (
     <section
@@ -639,13 +690,7 @@ export default function StudyPlanner() {
           <p style={{ color: "#969dbc", fontSize: "12px", margin: 0 }}>
             Planned sessions
           </p>
-          <div
-            style={{
-              marginTop: "10px",
-              fontSize: "28px",
-              fontWeight: 800,
-            }}
-          >
+          <div style={{ marginTop: "10px", fontSize: "28px", fontWeight: 800 }}>
             {plannedSessions.length}
           </div>
           <p style={{ color: "#7e86a6", fontSize: "11px", margin: "7px 0 0" }}>
@@ -657,13 +702,7 @@ export default function StudyPlanner() {
           <p style={{ color: "#969dbc", fontSize: "12px", margin: 0 }}>
             Completed sessions
           </p>
-          <div
-            style={{
-              marginTop: "10px",
-              fontSize: "28px",
-              fontWeight: 800,
-            }}
-          >
+          <div style={{ marginTop: "10px", fontSize: "28px", fontWeight: 800 }}>
             {completedSessions.length}
           </div>
           <p style={{ color: "#7e86a6", fontSize: "11px", margin: "7px 0 0" }}>
@@ -715,13 +754,7 @@ export default function StudyPlanner() {
             Choose a subject and reserve time for focused learning.
           </p>
 
-          <div
-            style={{
-              display: "flex",
-              flexDirection: "column",
-              gap: "9px",
-            }}
-          >
+          <div style={{ display: "flex", flexDirection: "column", gap: "9px" }}>
             <label
               htmlFor="planner-subject"
               style={{ color: "#c4c9e2", fontSize: "12px", fontWeight: 600 }}
@@ -739,9 +772,7 @@ export default function StudyPlanner() {
               disabled={loading || subjects.length === 0}
             >
               <option value="">
-                {subjects.length
-                  ? "Select a subject"
-                  : "Add a subject first"}
+                {subjects.length ? "Select a subject" : "Add a subject first"}
               </option>
 
               {subjects.map((subject) => (
@@ -772,9 +803,7 @@ export default function StudyPlanner() {
               type="datetime-local"
               value={form.startTime}
               onChange={updateForm}
-              min={new Date(Date.now() - new Date().getTimezoneOffset() * 60000)
-                .toISOString()
-                .slice(0, 16)}
+              min={minimumDateTime}
               required
               style={styles.input}
             />
@@ -822,8 +851,7 @@ export default function StudyPlanner() {
                   lineHeight: 1.6,
                 }}
               >
-                Create a subject first, then return here to schedule your
-                sessions.
+                Create a subject first, then return here to schedule sessions.
               </p>
             )}
           </div>
@@ -840,7 +868,6 @@ export default function StudyPlanner() {
             }}
           >
             <h3 style={{ margin: 0, fontSize: "18px" }}>Your sessions</h3>
-
             <span
               style={{
                 padding: "5px 8px",
@@ -856,17 +883,6 @@ export default function StudyPlanner() {
 
           {loading ? (
             <div style={{ padding: "35px 10px", textAlign: "center" }}>
-              <div
-                style={{
-                  width: "24px",
-                  height: "24px",
-                  margin: "0 auto 12px",
-                  border: "2px solid rgba(165,138,255,0.2)",
-                  borderTopColor: "#a58aff",
-                  borderRadius: "50%",
-                  animation: "studyplanner-spin 0.8s linear infinite",
-                }}
-              />
               <p style={{ color: "#969dbc", fontSize: "12px" }}>
                 Loading your study sessions...
               </p>
@@ -886,8 +902,7 @@ export default function StudyPlanner() {
                 Your schedule starts here
               </strong>
               <p style={{ fontSize: "11px", lineHeight: 1.7 }}>
-                Schedule your first study session to start tracking your
-                focus time.
+                Schedule your first study session to start tracking focus time.
               </p>
             </div>
           ) : (
@@ -900,9 +915,7 @@ export default function StudyPlanner() {
                     key={sessionId}
                     session={session}
                     busy={busySessionId === sessionId}
-                    onComplete={(item) =>
-                      changeSessionStatus(item, "completed")
-                    }
+                    onComplete={(item) => changeSessionStatus(item, "completed")}
                     onMiss={(item) => changeSessionStatus(item, "missed")}
                     onDelete={deleteSession}
                   />
@@ -915,10 +928,6 @@ export default function StudyPlanner() {
 
       <style>
         {`
-          @keyframes studyplanner-spin {
-            to { transform: rotate(360deg); }
-          }
-
           #study-planner input[type="datetime-local"]::-webkit-calendar-picker-indicator {
             cursor: pointer;
             filter: invert(0.8);
