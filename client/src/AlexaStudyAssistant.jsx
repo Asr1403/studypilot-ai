@@ -16,7 +16,7 @@ const PAGE_COMMANDS = [
 
 const INITIAL_MESSAGE = {
   role: "assistant",
-  text: "Hi! I'm your StudyPilot assistant. Ask me a question, open a page, check your study sessions, or ask me to schedule a session. I'll ask you to confirm before saving a session.",
+  text: "Hi! I'm your StudyPilot assistant. Ask me a question, open a page, check your study sessions, review your study progress, or ask me to schedule a session. I'll ask you to confirm before saving a session.",
 };
 
 function localDate(offset = 0) {
@@ -188,9 +188,75 @@ function isScheduleRequest(text) {
 }
 
 function isCompleteSessionRequest(text) {
-  return /\b(mark|set|update|make|complete|finish)\b/i.test(text) &&
+  return (
+    /\b(mark|set|update|make|complete|finish)\b/i.test(text) &&
     /\b(completed|complete|finished|done)\b/i.test(text) &&
-    /\b(session|sessions|study block)\b/i.test(text);
+    /\b(session|sessions|study block)\b/i.test(text)
+  );
+}
+
+function getStudyInsights(sessions, subjects) {
+  const completed = sessions.filter(
+    (session) => String(session.status || "").toLowerCase() === "completed"
+  );
+
+  const pending = sessions.filter(
+    (session) => String(session.status || "").toLowerCase() !== "completed"
+  );
+
+  const minutesStudied = completed.reduce(
+    (total, session) => total + (Number(session.durationMinutes) || 0),
+    0
+  );
+
+  const subjectCounts = subjects.map((subject) => {
+    const name = String(subject.name || "Unnamed subject");
+
+    const subjectSessions = sessions.filter(
+      (session) =>
+        getSessionSubject(session, subjects).toLowerCase() ===
+        name.toLowerCase()
+    );
+
+    const completedCount = subjectSessions.filter(
+      (session) => String(session.status || "").toLowerCase() === "completed"
+    ).length;
+
+    return {
+      name,
+      total: subjectSessions.length,
+      completed: completedCount,
+      pending: subjectSessions.length - completedCount,
+    };
+  });
+
+  const needsAttention = [...subjectCounts]
+    .filter((subject) => subject.pending > 0)
+    .sort((a, b) => b.pending - a.pending);
+
+  const nextSession = [...pending]
+    .filter((session) => session.date && session.date >= localDate(0))
+    .sort((a, b) =>
+      `${a.date} ${a.startTime || ""}`.localeCompare(
+        `${b.date} ${b.startTime || ""}`
+      )
+    )[0];
+
+  return {
+    total: sessions.length,
+    completed: completed.length,
+    pending: pending.length,
+    minutesStudied,
+    subjectCounts,
+    needsAttention,
+    nextSession,
+  };
+}
+
+function isStudyInsightsRequest(text) {
+  return /\b(what should i study next|what to study next|study insights|study progress|summari[sz]e my study progress|how many sessions|which subjects need|subjects need more attention|how many sessions have i completed|how much time have i studied|my completed sessions|my study statistics)\b/i.test(
+    text
+  );
 }
 
 export default function AlexaStudyAssistant({ onNavigate, onDataChange }) {
@@ -496,6 +562,56 @@ export default function AlexaStudyAssistant({ onNavigate, onDataChange }) {
     [addMessage, loadData, onDataChange, sessions, subjects]
   );
 
+  const handleStudyInsights = useCallback(() => {
+    if (!sessions.length) {
+      addMessage(
+        "assistant",
+        "You don't have any saved study sessions yet. Schedule a session first, and I'll be able to analyze your progress."
+      );
+      return;
+    }
+
+    const insights = getStudyInsights(sessions, subjects);
+
+    const subjectSummary = insights.subjectCounts.length
+      ? insights.subjectCounts
+          .map(
+            (subject) =>
+              `${subject.name}: ${subject.completed} completed, ${subject.pending} pending`
+          )
+          .join("; ")
+      : "No subjects have been added yet.";
+
+    const nextSessionSummary = insights.nextSession
+      ? `Your next pending session is ${getSessionSubject(
+          insights.nextSession,
+          subjects
+        )} on ${formatDate(insights.nextSession.date)} at ${formatTime(
+          insights.nextSession.startTime
+        )}.`
+      : "You have no future or today's pending sessions in your saved schedule.";
+
+    const attentionSummary = insights.needsAttention.length
+      ? `Subjects with pending sessions include ${insights.needsAttention
+          .slice(0, 3)
+          .map((subject) => `${subject.name} (${subject.pending} pending)`)
+          .join(", ")}.`
+      : "No subjects have pending sessions.";
+
+    const answer = [
+      `Study progress: ${insights.completed} of ${insights.total} sessions completed, with ${insights.pending} not marked completed.`,
+      `Completed-session study time: ${Math.floor(
+        insights.minutesStudied / 60
+      )} hours and ${insights.minutesStudied % 60} minutes.`,
+      `By subject: ${subjectSummary}.`,
+      nextSessionSummary,
+      attentionSummary,
+      "Recommendation: prioritize your next scheduled session, then review subjects with several pending sessions. This recommendation is based on your saved schedule, not exam difficulty.",
+    ].join("\n\n");
+
+    addMessage("assistant", answer);
+  }, [addMessage, sessions, subjects]);
+
   const handleCommand = useCallback(
     async (rawText) => {
       const text = rawText.trim();
@@ -577,6 +693,11 @@ export default function AlexaStudyAssistant({ onNavigate, onDataChange }) {
         return;
       }
 
+      if (isStudyInsightsRequest(text)) {
+        handleStudyInsights();
+        return;
+      }
+
       if (isScheduleRequest(text)) {
         prepareSession(text);
         return;
@@ -644,6 +765,7 @@ export default function AlexaStudyAssistant({ onNavigate, onDataChange }) {
     },
     [
       addMessage,
+      handleStudyInsights,
       loadData,
       markSessionCompleted,
       navigateTo,
@@ -840,6 +962,8 @@ export default function AlexaStudyAssistant({ onNavigate, onDataChange }) {
     "Show my study sessions",
     "Schedule a 30-minute session for tomorrow",
     "Mark my Data Structures session as completed",
+    "Summarize my study progress",
+    "What should I study next?",
     "Explain cloud computing simply",
   ];
 
@@ -855,7 +979,8 @@ export default function AlexaStudyAssistant({ onNavigate, onDataChange }) {
 
         <p className="panel-description">
           Speak naturally. Supported commands can open pages and read your
-          study data. Scheduling requires your confirmation, while general
+          study data. Ask for personalized study insights based on your saved
+          sessions. Scheduling requires your confirmation, while general
           questions use your existing AI backend.
         </p>
 
