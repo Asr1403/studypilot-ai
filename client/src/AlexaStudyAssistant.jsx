@@ -1,592 +1,803 @@
 
-import { useCallback, useEffect, useState } from "react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
 
 const API_URL = "http://localhost:3000/api";
 
-function localDate(offset = 0) {
+const PAGE_COMMANDS = [
+  { page: "overview", names: ["dashboard", "home", "overview"] },
+  { page: "subjects", names: ["subjects", "my subjects", "subject list"] },
+  { page: "planner", names: ["planner", "study planner", "schedule", "calendar"] },
+  { page: "exams", names: ["exam prep", "exams", "exam preparation"] },
+  { page: "twin", names: ["academic twin", "twin", "academic analysis"] },
+  { page: "rescue", names: ["ai rescue", "rescue", "missed sessions", "schedule rescue"] },
+  { page: "voice", names: ["voice coach", "voice coaching"] },
+];
+
+function getTomorrowDate(offset = 1) {
   const date = new Date();
   date.setDate(date.getDate() + offset);
-
   const year = date.getFullYear();
   const month = String(date.getMonth() + 1).padStart(2, "0");
   const day = String(date.getDate()).padStart(2, "0");
-
   return `${year}-${month}-${day}`;
 }
 
-function speak(text) {
-  if (!("speechSynthesis" in window)) return;
+function parseDate(text) {
+  const value = text.toLowerCase();
 
-  window.speechSynthesis.cancel();
+  if (value.includes("day after tomorrow")) return getTomorrowDate(2);
+  if (value.includes("tomorrow")) return getTomorrowDate(1);
+  if (value.includes("today")) return getTomorrowDate(0);
 
-  const utterance = new SpeechSynthesisUtterance(text);
-  utterance.lang = "en-IN";
-  utterance.rate = 1.05;
+  const explicit = value.match(/\b(\d{4}-\d{2}-\d{2})\b/);
+  if (explicit) return explicit[1];
 
-  window.speechSynthesis.speak(utterance);
+  return getTomorrowDate(1);
 }
 
-export default function AlexaStudyAssistant({ onNavigate, onDataChange }) {
+function parseDuration(text) {
+  const value = text.toLowerCase();
+
+  const hours = value.match(/(\d+(?:\.\d+)?)\s*(?:hours?|hrs?)\b/);
+  const minutes = value.match(/(\d+)\s*(?:minutes?|mins?)\b/);
+
+  if (hours) return Math.round(Number(hours[1]) * 60);
+  if (minutes) return Number(minutes[1]);
+
+  return 30;
+}
+
+function parseStartTime(text) {
+  const value = text.toLowerCase();
+
+  const match = value.match(
+    /\b(?:at\s*)?(\d{1,2})(?::(\d{2}))?\s*(a\.?m\.?|p\.?m\.?)\b/i
+  );
+
+  if (!match) return "18:00";
+
+  let hour = Number(match[1]);
+  const minute = Number(match[2] || 0);
+  const meridiem = match[3].replace(/\./g, "").toLowerCase();
+
+  if (hour < 1 || hour > 12 || minute > 59) return "18:00";
+
+  if (meridiem === "pm" && hour !== 12) hour += 12;
+  if (meridiem === "am" && hour === 12) hour = 0;
+
+  return `${String(hour).padStart(2, "0")}:${String(minute).padStart(2, "0")}`;
+}
+
+function formatDate(date) {
+  if (!date) return "";
+  const parsed = new Date(`${date}T12:00:00`);
+  return Number.isNaN(parsed.getTime())
+    ? date
+    : parsed.toLocaleDateString("en-IN", {
+        day: "numeric",
+        month: "short",
+        year: "numeric",
+      });
+}
+
+function getErrorMessage(data, fallback) {
+  return data?.message || data?.error || fallback;
+}
+
+export default function AlexaStudyAssistant({
+  onNavigate,
+  onDataChange,
+}) {
   const [subjects, setSubjects] = useState([]);
   const [sessions, setSessions] = useState([]);
   const [messages, setMessages] = useState([
     {
       role: "assistant",
-      text: "Hi! I'm your StudyPilot assistant. Ask about your studies, or say something like: schedule a 30-minute session for Data Structures tomorrow.",
+      text: "Hi! I'm your StudyPilot assistant. You can ask a question, open a page, check your study sessions, or ask me to prepare a study session for your confirmation.",
     },
   ]);
-
-  const [question, setQuestion] = useState("");
+  const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
   const [listening, setListening] = useState(false);
+  const [speaking, setSpeaking] = useState(false);
   const [error, setError] = useState("");
+  const [notice, setNotice] = useState("");
   const [proposal, setProposal] = useState(null);
-  const [confirmation, setConfirmation] = useState("");
+  const [saving, setSaving] = useState(false);
 
-  const [sessionForm, setSessionForm] = useState({
+  const recognitionRef = useRef(null);
+  const transcriptRef = useRef("");
+  const mountedRef = useRef(true);
+
+  const [form, setForm] = useState({
     subjectId: "",
-    date: localDate(1),
+    date: getTomorrowDate(1),
     startTime: "18:00",
     durationMinutes: 30,
   });
 
+  const addMessage = useCallback((role, text) => {
+    setMessages((previous) => [...previous, { role, text }]);
+  }, []);
+
   const loadData = useCallback(async () => {
     try {
-      const [subjectResponse, sessionResponse] = await Promise.all([
+      const [subjectsResponse, sessionsResponse] = await Promise.all([
         fetch(`${API_URL}/subjects`),
         fetch(`${API_URL}/sessions`),
       ]);
 
-      const [subjectData, sessionData] = await Promise.all([
-        subjectResponse.json(),
-        sessionResponse.json(),
-      ]);
-
-      if (!subjectResponse.ok || !sessionResponse.ok) {
-        throw new Error("Could not load your saved study data.");
+      if (!subjectsResponse.ok || !sessionsResponse.ok) {
+        throw new Error("Could not load your subjects and study sessions.");
       }
 
-      const nextSubjects = Array.isArray(subjectData)
-        ? subjectData
-        : subjectData.subjects || [];
+      const subjectsData = await subjectsResponse.json();
+      const sessionsData = await sessionsResponse.json();
 
-      const nextSessions = Array.isArray(sessionData)
-        ? sessionData
-        : sessionData.sessions || [];
+      if (!Array.isArray(subjectsData) || !Array.isArray(sessionsData)) {
+        throw new Error("The subjects or sessions API returned an unexpected response.");
+      }
 
-      setSubjects(nextSubjects);
-      setSessions(nextSessions);
+      if (!mountedRef.current) return;
 
-      setSessionForm((current) => ({
-        ...current,
+      setSubjects(subjectsData);
+      setSessions(sessionsData);
+
+      setForm((previous) => ({
+        ...previous,
         subjectId:
-          current.subjectId ||
-          (nextSubjects[0]?._id ? String(nextSubjects[0]._id) : ""),
+          previous.subjectId ||
+          subjectsData[0]?._id ||
+          subjectsData[0]?.id ||
+          "",
       }));
     } catch (err) {
-      setError(err.message || "Could not connect to StudyPilot.");
+      if (mountedRef.current) {
+        setError(err.message || "Unable to load StudyPilot data.");
+      }
     }
   }, []);
 
   useEffect(() => {
+    mountedRef.current = true;
     loadData();
 
     return () => {
+      mountedRef.current = false;
+      recognitionRef.current?.abort();
+
       if ("speechSynthesis" in window) {
         window.speechSynthesis.cancel();
       }
     };
   }, [loadData]);
 
-  const addAssistantMessage = (text) => {
-    setMessages((current) => [
-      ...current,
-      { role: "assistant", text },
-    ]);
-  };
+  const speak = useCallback((text) => {
+    if (!("speechSynthesis" in window)) {
+      setError("Speech playback is not supported in this browser.");
+      return;
+    }
 
-  function detectSchedulingIntent(text) {
-    return /\b(schedule|create|book|add|plan)\b/i.test(text) &&
-      /\b(session|study|block|minutes|minute|hour|hours|tomorrow|today)\b/i.test(text);
-  }
+    window.speechSynthesis.cancel();
 
-  function prepareSession(text) {
-    if (!subjects.length) {
-      addAssistantMessage(
-        "You don't have any subjects saved yet. Add a subject in My Subjects first, then come back and ask me to schedule a session."
+    const utterance = new SpeechSynthesisUtterance(text);
+    utterance.lang = "en-IN";
+    utterance.rate = 1;
+
+    utterance.onstart = () => setSpeaking(true);
+    utterance.onend = () => setSpeaking(false);
+    utterance.onerror = () => setSpeaking(false);
+
+    window.speechSynthesis.speak(utterance);
+  }, []);
+
+  const navigateTo = useCallback(
+    (page, message) => {
+      setProposal(null);
+      setNotice(message);
+      setError("");
+      onNavigate?.(page);
+      addMessage("assistant", message);
+    },
+    [addMessage, onNavigate]
+  );
+
+  const prepareSession = useCallback(
+    (text) => {
+      if (!subjects.length) {
+        addMessage(
+          "assistant",
+          "You need to add a subject before scheduling a session. Open My Subjects and add one first."
+        );
+        setNotice("Add a subject before scheduling.");
+        return;
+      }
+
+      const lower = text.toLowerCase();
+
+      const matchedSubject = subjects.find((subject) =>
+        lower.includes(String(subject.name || "").toLowerCase())
       );
-      return;
-    }
 
-    const lower = text.toLowerCase();
+      const subjectId =
+        matchedSubject?._id ||
+        matchedSubject?.id ||
+        subjects[0]?._id ||
+        subjects[0]?.id ||
+        "";
 
-    const matchedSubject = subjects.find((subject) =>
-      lower.includes(String(subject.name).toLowerCase())
-    );
+      const duration = parseDuration(text);
 
-    const durationMatch = lower.match(/(\d{1,3})\s*(minute|min|hour|hr)s?\b/i);
-    let duration = 30;
-
-    if (durationMatch) {
-      const amount = Number(durationMatch[1]);
-      const unit = durationMatch[2].toLowerCase();
-      duration = unit.startsWith("h") ? amount * 60 : amount;
-    }
-
-    duration = Math.max(15, Math.min(600, duration));
-
-    let date = localDate(1);
-
-    if (/\btoday\b/i.test(lower)) {
-      date = localDate(0);
-    } else if (/\bday after tomorrow\b/i.test(lower)) {
-      date = localDate(2);
-    }
-
-    const timeMatch = lower.match(/\b(\d{1,2})(?::(\d{2}))?\s*(am|pm)\b/i);
-    let startTime = "18:00";
-
-    if (timeMatch) {
-      let hours = Number(timeMatch[1]);
-      const minutes = Number(timeMatch[2] || 0);
-      const meridiem = timeMatch[3].toLowerCase();
-
-      if (hours >= 1 && hours <= 12 && minutes < 60) {
-        if (meridiem === "pm" && hours !== 12) hours += 12;
-        if (meridiem === "am" && hours === 12) hours = 0;
-
-        startTime =
-          `${String(hours).padStart(2, "0")}:` +
-          `${String(minutes).padStart(2, "0")}`;
-      }
-    }
-
-    const selectedSubject = matchedSubject || subjects[0];
-
-    setSessionForm({
-      subjectId: String(selectedSubject._id),
-      date,
-      startTime,
-      durationMinutes: duration,
-    });
-
-    setProposal({
-      subjectId: String(selectedSubject._id),
-      subjectName: selectedSubject.name,
-      date,
-      startTime,
-      durationMinutes: duration,
-    });
-
-    setConfirmation("");
-
-    addAssistantMessage(
-      `I prepared a session for ${selectedSubject.name}. Please review the date, time, and duration below. I haven't saved or scheduled anything yet.`
-    );
-  }
-
-  async function askAssistant(rawQuestion) {
-    const text = rawQuestion.trim();
-
-    if (!text || loading) return;
-
-    setQuestion("");
-    setError("");
-    setConfirmation("");
-
-    setMessages((current) => [
-      ...current,
-      { role: "user", text },
-    ]);
-
-    if (detectSchedulingIntent(text)) {
-      prepareSession(text);
-      return;
-    }
-
-    setLoading(true);
-
-    try {
-      const [subjectResponse, sessionResponse] = await Promise.all([
-        fetch(`${API_URL}/subjects`),
-        fetch(`${API_URL}/sessions`),
-      ]);
-
-      const [subjectData, sessionData] = await Promise.all([
-        subjectResponse.json(),
-        sessionResponse.json(),
-      ]);
-
-      if (!subjectResponse.ok || !sessionResponse.ok) {
-        throw new Error("Could not retrieve your current study records.");
+      if (duration < 15 || duration > 600) {
+        addMessage(
+          "assistant",
+          "Study sessions must be between 15 and 600 minutes. Please say a valid duration."
+        );
+        return;
       }
 
-      const currentSubjects = Array.isArray(subjectData)
-        ? subjectData
-        : subjectData.subjects || [];
-
-      const currentSessions = Array.isArray(sessionData)
-        ? sessionData
-        : sessionData.sessions || [];
-
-      setSubjects(currentSubjects);
-      setSessions(currentSessions);
-
-      const context = {
-        subjects: currentSubjects.map((subject) => ({
-          id: String(subject._id),
-          name: subject.name,
-          targetHours: subject.targetHours,
-        })),
-        sessions: currentSessions.slice(0, 20).map((session) => ({
-          subjectName: session.subjectName,
-          date: session.date,
-          startTime: session.startTime,
-          durationMinutes: session.durationMinutes,
-          status: session.status,
-          actualMinutes: session.actualMinutes,
-        })),
+      const proposalForm = {
+        subjectId,
+        date: parseDate(text),
+        startTime: parseStartTime(text),
+        durationMinutes: duration,
       };
 
-      const prompt = [
-        "You are StudyPilot, a voice-first academic study assistant.",
-        "Answer naturally and concisely, usually in 2 to 5 sentences.",
-        "Use only the study records provided for personal statistics.",
-        "Never invent grades, deadlines, subjects, or study history.",
-        "Do not claim to have changed or scheduled anything.",
-        "If the user wants to schedule a session, explain that they can review and confirm it in the session proposal form.",
-        `Study records: ${JSON.stringify(context)}`,
-        `User question: ${text}`,
-      ].join("\n\n");
+      setForm(proposalForm);
+      setProposal({ originalRequest: text });
+      setNotice("");
+      setError("");
 
-      const aiResponse = await fetch(`${API_URL}/ai/chat`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          message: prompt.slice(0, 950),
-        }),
-      });
+      addMessage(
+        "assistant",
+        `I've prepared a session for ${matchedSubject?.name || subjects[0]?.name || "your subject"}. Please review the subject, date, time and duration below. Nothing has been saved yet.`
+      );
+    },
+    [addMessage, subjects]
+  );
 
-      const aiData = await aiResponse.json();
+  const handleCommand = useCallback(
+    async (rawText) => {
+      const text = rawText.trim();
+      if (!text) return;
 
-      if (!aiResponse.ok || !aiData.success || !aiData.answer) {
-        throw new Error(
-          aiData.message || "The AI service could not answer right now."
-        );
+      const lower = text.toLowerCase().replace(/[?!.,]+$/g, "").trim();
+
+      setError("");
+      setNotice("");
+
+      // Open pages directly rather than asking the AI to interpret navigation.
+      const pageCommand = PAGE_COMMANDS.find((item) =>
+        item.names.some((name) => {
+          const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+          return new RegExp(
+            `\\b(?:open|go to|show|take me to|navigate to|visit)\\s+(?:the\\s+)?${escaped}\\b`,
+            "i"
+          ).test(lower);
+        })
+      );
+
+      if (pageCommand) {
+        navigateTo(pageCommand.page, `Opening ${pageCommand.names[0]}.`);
+        return;
       }
 
-      addAssistantMessage(aiData.answer);
-    } catch (err) {
-      setError(err.message || "The assistant could not answer right now.");
-      addAssistantMessage(
-        "I couldn't get an AI response just now. You can still review your saved sessions or prepare a study session using the action form."
+      // Read subjects from the backend.
+      if (
+        /\b(list|show|read|tell me|what are)\b/.test(lower) &&
+        /\b(subjects|my subjects)\b/.test(lower)
+      ) {
+        if (!subjects.length) {
+          addMessage("assistant", "You haven't added any subjects yet.");
+        } else {
+          addMessage(
+            "assistant",
+            `Your subjects are: ${subjects
+              .map((subject) => subject.name)
+              .filter(Boolean)
+              .join(", ")}.`
+          );
+        }
+        return;
+      }
+
+      // Summarize sessions using the current backend data.
+      if (
+        /\b(show|list|check|what are|tell me|read)\b/.test(lower) &&
+        /\b(sessions|study sessions|study schedule|my schedule|upcoming sessions)\b/.test(lower)
+      ) {
+        if (!sessions.length) {
+          addMessage(
+            "assistant",
+            "You don't have any study sessions saved yet. Ask me to schedule one."
+          );
+        } else {
+          const upcoming = [...sessions]
+            .sort((a, b) =>
+              `${a.date || ""} ${a.startTime || ""}`.localeCompare(
+                `${b.date || ""} ${b.startTime || ""}`
+              )
+            )
+            .slice(0, 8);
+
+          const summary = upcoming
+            .map((session) => {
+              const subject =
+                session.subjectName ||
+                subjects.find(
+                  (item) =>
+                    (item._id || item.id) === session.subjectId
+                )?.name ||
+                "Study session";
+
+              return `${subject} on ${formatDate(session.date)} at ${
+                session.startTime || "an unspecified time"
+              } for ${session.durationMinutes || 0} minutes`;
+            })
+            .join(". ");
+
+          addMessage("assistant", `Here are your saved sessions: ${summary}.`);
+        }
+        return;
+      }
+
+      // Schedule requests must become a reviewable proposal.
+      const schedulingIntent =
+        /\b(schedule|create|book|add|plan|set up|arrange)\b/.test(lower) &&
+        /\b(session|study|studying|block|minutes?|mins?|hours?|hrs?|tomorrow|today)\b/.test(
+          lower
+        );
+
+      if (schedulingIntent) {
+        prepareSession(text);
+        return;
+      }
+
+      // Refresh local data on request.
+      if (/\b(refresh|reload|update)\b/.test(lower) && /\b(data|dashboard|subjects|sessions)\b/.test(lower)) {
+        await loadData();
+        addMessage("assistant", "I've refreshed your subjects and study sessions.");
+        return;
+      }
+
+      // General questions use the existing backend Groq integration.
+      setLoading(true);
+
+      try {
+        const response = await fetch(`${API_URL}/ai/chat`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            question: text,
+            context: {
+              app: "StudyPilot AI",
+              subjects: subjects.map((subject) => subject.name),
+              sessions: sessions.slice(0, 20).map((session) => ({
+                subjectName: session.subjectName,
+                subjectId: session.subjectId,
+                date: session.date,
+                startTime: session.startTime,
+                durationMinutes: session.durationMinutes,
+                status: session.status,
+              })),
+            },
+          }),
+        });
+
+        const data = await response.json().catch(() => ({}));
+
+        if (!response.ok) {
+          throw new Error(
+            getErrorMessage(data, `AI request failed (${response.status}).`)
+          );
+        }
+
+        const answer = data.answer || data.message;
+
+        if (!answer) {
+          throw new Error("The AI endpoint returned no answer.");
+        }
+
+        addMessage("assistant", answer);
+      } catch (err) {
+        setError(err.message || "Could not get an AI response.");
+        addMessage(
+          "assistant",
+          "I couldn't reach the AI service just now. Your microphone is working, but please check the backend terminal and the /api/ai/chat request."
+        );
+      } finally {
+        setLoading(false);
+      }
+    },
+    [
+      addMessage,
+      loadData,
+      navigateTo,
+      prepareSession,
+      sessions,
+      subjects,
+    ]
+  );
+
+  const submitText = useCallback(
+    async (value = input) => {
+      const text = value.trim();
+      if (!text || loading || saving) return;
+
+      setInput("");
+      addMessage("user", text);
+      await handleCommand(text);
+    },
+    [addMessage, handleCommand, input, loading, saving]
+  );
+
+  const startListening = useCallback(() => {
+    const SpeechRecognition =
+      window.SpeechRecognition || window.webkitSpeechRecognition;
+
+    if (!SpeechRecognition) {
+      setError(
+        "Speech recognition isn't supported here. Use the latest Google Chrome and allow microphone access."
       );
-    } finally {
-      setLoading(false);
-    }
-  }
-
-  async function confirmSession(event) {
-    event.preventDefault();
-
-    if (!proposal || loading) return;
-
-    const subject = subjects.find(
-      (item) => String(item._id) === sessionForm.subjectId
-    );
-
-    if (!subject) {
-      setError("Please choose a valid subject.");
       return;
     }
 
-    setLoading(true);
+    recognitionRef.current?.abort();
+
+    const recognition = new SpeechRecognition();
+    recognition.lang = "en-IN";
+    recognition.continuous = false;
+    recognition.interimResults = true;
+    recognition.maxAlternatives = 1;
+
+    transcriptRef.current = "";
+    setListening(true);
     setError("");
-    setConfirmation("");
+    setNotice("Listening… speak now.");
+
+    recognition.onresult = (event) => {
+      let finalTranscript = "";
+      let interimTranscript = "";
+
+      for (let i = event.resultIndex; i < event.results.length; i += 1) {
+        const transcript = event.results[i][0].transcript;
+
+        if (event.results[i].isFinal) {
+          finalTranscript += transcript;
+        } else {
+          interimTranscript += transcript;
+        }
+      }
+
+      if (finalTranscript.trim()) {
+        transcriptRef.current += ` ${finalTranscript.trim()}`;
+      }
+
+      setInput(
+        `${transcriptRef.current} ${interimTranscript}`.trim()
+      );
+    };
+
+    recognition.onerror = (event) => {
+      setListening(false);
+      setNotice("");
+
+      if (event.error !== "aborted" && event.error !== "no-speech") {
+        setError(`Microphone error: ${event.error}.`);
+      }
+    };
+
+    recognition.onend = () => {
+      setListening(false);
+      setNotice("");
+
+      const transcript = transcriptRef.current.trim();
+
+      // Process only the final recognized transcript.
+      if (transcript) {
+        setInput("");
+        addMessage("user", transcript);
+        handleCommand(transcript);
+      }
+    };
+
+    recognitionRef.current = recognition;
+
+    try {
+      recognition.start();
+    } catch {
+      setListening(false);
+      setError("Couldn't start listening. Please try the microphone again.");
+    }
+  }, [addMessage, handleCommand]);
+
+  const confirmSession = useCallback(async () => {
+    if (saving || !proposal) return;
+
+    if (!form.subjectId) {
+      setError("Please choose a subject before confirming.");
+      return;
+    }
+
+    if (!form.date || !form.startTime) {
+      setError("Please choose a date and start time.");
+      return;
+    }
+
+    if (
+      !Number.isInteger(Number(form.durationMinutes)) ||
+      Number(form.durationMinutes) < 15 ||
+      Number(form.durationMinutes) > 600
+    ) {
+      setError("Duration must be between 15 and 600 minutes.");
+      return;
+    }
+
+    setSaving(true);
+    setError("");
+    setNotice("");
 
     try {
       const response = await fetch(`${API_URL}/sessions`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          subjectId: sessionForm.subjectId,
-          date: sessionForm.date,
-          startTime: sessionForm.startTime,
-          durationMinutes: Number(sessionForm.durationMinutes),
+          subjectId: form.subjectId,
+          date: form.date,
+          startTime: form.startTime,
+          durationMinutes: Number(form.durationMinutes),
         }),
       });
 
-      const data = await response.json();
+      const data = await response.json().catch(() => ({}));
 
       if (!response.ok) {
-        throw new Error(data.error || "Could not schedule the session.");
+        throw new Error(
+          getErrorMessage(
+            data,
+            `Couldn't save the session (${response.status}).`
+          )
+        );
       }
 
-      const successMessage =
-        `Confirmed! Your ${subject.name} session is saved for ` +
-        `${data.date} at ${data.startTime}, lasting ` +
-        `${data.durationMinutes} minutes.`;
+      const subject = subjects.find(
+        (item) => (item._id || item.id) === form.subjectId
+      );
 
-      setConfirmation(successMessage);
-      addAssistantMessage(successMessage);
       setProposal(null);
-
       await loadData();
       onDataChange?.();
+
+      const confirmation =
+        `Session saved successfully: ${subject?.name || data.subjectName || "Study session"}, ` +
+        `${formatDate(form.date)} at ${form.startTime}, ` +
+        `${Number(form.durationMinutes)} minutes.`;
+
+      setNotice(confirmation);
+      addMessage("assistant", confirmation);
     } catch (err) {
-      setError(err.message || "Could not schedule the session.");
-    } finally {
-      setLoading(false);
-    }
-  }
-
-  function startListening() {
-    setError("");
-
-    const SpeechRecognition =
-      window.SpeechRecognition || window.webkitSpeechRecognition;
-
-    if (!SpeechRecognition) {
-      setError("Voice input is not supported in this browser. Please use Chrome or type your request.");
-      return;
-    }
-
-    const recognition = new SpeechRecognition();
-    recognition.lang = "en-IN";
-    recognition.continuous = false;
-    recognition.interimResults = false;
-
-    recognition.onstart = () => setListening(true);
-
-    recognition.onresult = (event) => {
-      const transcript = event.results?.[0]?.[0]?.transcript || "";
-      setQuestion(transcript);
-
-      if (transcript.trim()) {
-        askAssistant(transcript);
-      }
-    };
-
-    recognition.onerror = (event) => {
       setError(
-        event.error === "not-allowed"
-          ? "Microphone permission was denied. Allow microphone access in Chrome."
-          : `Voice input failed: ${event.error}. You can type instead.`
+        err.message ||
+          "The session couldn't be saved. Check the backend terminal for details."
       );
-      setListening(false);
-    };
-
-    recognition.onend = () => setListening(false);
-
-    try {
-      recognition.start();
-    } catch {
-      setListening(false);
-      setError("Could not start the microphone. Please try again.");
+    } finally {
+      setSaving(false);
     }
-  }
+  }, [
+    addMessage,
+    form,
+    loadData,
+    onDataChange,
+    proposal,
+    saving,
+    subjects,
+  ]);
 
-  const completedCount = sessions.filter(
-    (session) => session.status === "completed"
-  ).length;
+  const cancelProposal = () => {
+    setProposal(null);
+    setNotice("Scheduling cancelled. No session was saved.");
+    addMessage("assistant", "No problem. I cancelled the proposed session.");
+  };
 
-  const upcomingCount = sessions.filter(
-    (session) => session.status === "planned"
-  ).length;
+  const suggestions = [
+    "Open the study planner",
+    "Show my subjects",
+    "Show my study sessions",
+    "Schedule a 30-minute session for tomorrow",
+    "Explain cloud computing simply",
+  ];
 
   return (
     <div className="voice-page">
-      <section className="panel" style={{ padding: 24 }}>
-        <span className="section-eyebrow">VOICE-FIRST STUDY ASSISTANT</span>
-        <h2 style={{ marginTop: 10 }}>Your study assistant, ready to help.</h2>
+      <div className="panel" style={{ marginBottom: 20 }}>
+        <div className="section-eyebrow">STUDYPILOT AI</div>
+        <div className="panel-heading">
+          <h2>Study Assistant</h2>
+          <span className="badge">Voice + AI</span>
+        </div>
         <p className="panel-description">
-          Ask questions, review your study activity, or prepare a session.
-          Proposed actions are not saved until you confirm them.
+          Speak naturally. Supported commands perform actions, scheduling
+          requires your confirmation, and general questions use your existing
+          AI backend.
         </p>
 
         <div className="voice-stat-grid">
-          <article className="voice-stat-card">
-            <div>
-              <strong>{subjects.length}</strong>
-              <span>Subjects</span>
-            </div>
-          </article>
-          <article className="voice-stat-card">
-            <div>
-              <strong>{completedCount}</strong>
-              <span>Completed sessions</span>
-            </div>
-          </article>
-          <article className="voice-stat-card">
-            <div>
-              <strong>{upcomingCount}</strong>
-              <span>Planned sessions</span>
-            </div>
-          </article>
-        </div>
-      </section>
-
-      {error && (
-        <div className="alert alert-error" role="alert">
-          {error}
-        </div>
-      )}
-
-      {confirmation && (
-        <div className="alert" role="status">
-          {confirmation}
-        </div>
-      )}
-
-      <section className="panel" style={{ padding: 24, marginTop: 20 }}>
-        <div className="panel-heading">
-          <div>
-            <span className="section-eyebrow">CONVERSATION</span>
-            <h3>Talk to StudyPilot</h3>
+          <div className="voice-stat-card">
+            <span>Subjects</span>
+            <strong>{subjects.length}</strong>
           </div>
+          <div className="voice-stat-card">
+            <span>Saved sessions</span>
+            <strong>{sessions.length}</strong>
+          </div>
+          <div className="voice-stat-card">
+            <span>Assistant</span>
+            <strong>{loading ? "Thinking…" : listening ? "Listening…" : "Ready"}</strong>
+          </div>
+        </div>
 
+        {error && (
+          <div className="alert" role="alert" style={{ marginTop: 16 }}>
+            {error}
+          </div>
+        )}
+
+        {notice && (
+          <div className="alert" role="status" style={{ marginTop: 16 }}>
+            {notice}
+          </div>
+        )}
+      </div>
+
+      <div className="panel" style={{ marginBottom: 20 }}>
+        <div className="panel-heading">
+          <h3>Conversation</h3>
           <button
-            className="icon-button"
             type="button"
-            onClick={loadData}
-            disabled={loading}
-            title="Refresh study data"
+            className="icon-button"
+            onClick={() => {
+              setMessages([]);
+              setError("");
+              setNotice("");
+              setProposal(null);
+            }}
+            title="Clear conversation"
           >
-            ↻
+            Clear
           </button>
         </div>
 
         <div
           aria-live="polite"
           style={{
-            display: "grid",
-            gap: 14,
+            display: "flex",
+            flexDirection: "column",
+            gap: 12,
             maxHeight: 400,
             overflowY: "auto",
-            padding: "16px 0",
+            padding: "8px 2px",
           }}
         >
           {messages.map((message, index) => (
-            <article
-              key={`${message.role}-${index}`}
+            <div
+              key={`${index}-${message.role}`}
               style={{
-                padding: 14,
-                borderRadius: 12,
+                alignSelf:
+                  message.role === "user" ? "flex-end" : "flex-start",
+                maxWidth: "90%",
+                padding: "12px 14px",
+                borderRadius: 14,
                 background:
                   message.role === "user"
-                    ? "rgba(124, 92, 255, 0.14)"
-                    : "rgba(255, 255, 255, 0.04)",
+                    ? "rgba(124, 92, 255, 0.22)"
+                    : "rgba(255,255,255,0.055)",
+                border: "1px solid rgba(255,255,255,0.08)",
+                whiteSpace: "pre-wrap",
+                overflowWrap: "anywhere",
               }}
             >
-              <strong>
-                {message.role === "user" ? "YOU" : "STUDYPILOT"}
-              </strong>
-              <p style={{ whiteSpace: "pre-wrap", marginBottom: 8 }}>
-                {message.text}
-              </p>
+              <div
+                style={{
+                  fontSize: 11,
+                  opacity: 0.7,
+                  marginBottom: 5,
+                  textTransform: "uppercase",
+                }}
+              >
+                {message.role === "user" ? "You" : "StudyPilot"}
+              </div>
+              {message.text}
               {message.role === "assistant" && (
-                <button
-                  type="button"
-                  className="voice-speak-button"
-                  onClick={() => speak(message.text)}
-                >
-                  Read aloud
-                </button>
+                <div style={{ marginTop: 8 }}>
+                  <button
+                    type="button"
+                    className="icon-button"
+                    onClick={() => speak(message.text)}
+                  >
+                    Read aloud
+                  </button>
+                </div>
               )}
-            </article>
+            </div>
           ))}
 
-          {loading && <p>Working on your request…</p>}
+          {loading && (
+            <div className="panel-description">StudyPilot is thinking…</div>
+          )}
         </div>
 
         <form
           className="voice-composer"
           onSubmit={(event) => {
             event.preventDefault();
-            askAssistant(question);
+            submitText();
           }}
         >
-          <button
-            className="voice-mic-button"
-            type="button"
-            onClick={startListening}
-            disabled={loading || listening}
-            aria-label="Start voice input"
-          >
-            {listening ? "Listening…" : "🎙"}
-          </button>
-
           <input
-            value={question}
-            onChange={(event) => setQuestion(event.target.value)}
-            placeholder="Ask a question or request a study session…"
-            maxLength={500}
-            disabled={loading}
             aria-label="Message StudyPilot"
+            value={input}
+            onChange={(event) => setInput(event.target.value)}
+            placeholder="Say or type a command…"
+            disabled={loading || saving}
           />
 
           <button
-            className="voice-send-button"
+            type="button"
+            className="voice-mic-button"
+            onClick={listening ? () => recognitionRef.current?.stop() : startListening}
+            disabled={loading || saving}
+            title={listening ? "Stop listening" : "Start voice input"}
+          >
+            {listening ? "Stop" : "Mic"}
+          </button>
+
+          <button
             type="submit"
-            disabled={!question.trim() || loading}
-            aria-label="Send message"
+            className="voice-send-button"
+            disabled={!input.trim() || loading || saving}
           >
             Send
           </button>
         </form>
 
-        <div className="voice-suggestions" style={{ marginTop: 16 }}>
-          {[
-            "What should I study today?",
-            "Summarize my progress",
-            "Schedule a 30-minute session for tomorrow",
-            "Help me prepare for placements",
-          ].map((suggestion) => (
-            <button
-              key={suggestion}
-              className="voice-suggestion"
-              type="button"
-              disabled={loading}
-              onClick={() => askAssistant(suggestion)}
-            >
-              {suggestion}
-            </button>
-          ))}
+        <div className="panel-description" style={{ marginTop: 10 }}>
+          {listening
+            ? "Listening now. Your final recognized sentence will be processed automatically."
+            : speaking
+              ? "Speaking the selected response."
+              : "You can also type a command and press Send."}
         </div>
-      </section>
+      </div>
 
       {proposal && (
-        <section className="panel" style={{ padding: 24, marginTop: 20 }}>
-          <span className="section-eyebrow">ACTION REQUIRES CONFIRMATION</span>
-          <h3>Review your proposed study session</h3>
+        <div className="panel" style={{ marginBottom: 20 }}>
+          <div className="section-eyebrow">REVIEW BEFORE SAVING</div>
+          <div className="panel-heading">
+            <h3>Proposed study session</h3>
+          </div>
           <p className="panel-description">
-            Nothing has been saved yet. Check these details, then confirm to
-            create the session in your StudyPilot database.
+            Check these details carefully. The session will not be saved until
+            you select Confirm and schedule.
           </p>
 
-          <form onSubmit={confirmSession} style={{ display: "grid", gap: 16 }}>
+          <div style={{ display: "grid", gap: 14 }}>
             <label>
-              Subject
+              <span style={{ display: "block", marginBottom: 6 }}>Subject</span>
               <select
-                value={sessionForm.subjectId}
-                onChange={(event) => {
-                  const subjectId = event.target.value;
-                  setSessionForm((current) => ({ ...current, subjectId }));
-
-                  const selected = subjects.find(
-                    (item) => String(item._id) === subjectId
-                  );
-
-                  setProposal((current) =>
-                    current
-                      ? { ...current, subjectId, subjectName: selected?.name || "" }
-                      : current
-                  );
-                }}
-                required
+                value={form.subjectId}
+                onChange={(event) =>
+                  setForm((previous) => ({
+                    ...previous,
+                    subjectId: event.target.value,
+                  }))
+                }
+                style={{ width: "100%", padding: 10 }}
               >
                 {subjects.map((subject) => (
-                  <option key={subject._id} value={String(subject._id)}>
+                  <option
+                    key={subject._id || subject.id}
+                    value={subject._id || subject.id}
+                  >
                     {subject.name}
                   </option>
                 ))}
@@ -594,91 +805,105 @@ export default function AlexaStudyAssistant({ onNavigate, onDataChange }) {
             </label>
 
             <label>
-              Date
+              <span style={{ display: "block", marginBottom: 6 }}>Date</span>
               <input
                 type="date"
-                value={sessionForm.date}
-                min={localDate(0)}
+                value={form.date}
                 onChange={(event) =>
-                  setSessionForm((current) => ({
-                    ...current,
+                  setForm((previous) => ({
+                    ...previous,
                     date: event.target.value,
                   }))
                 }
-                required
+                style={{ width: "100%", padding: 10 }}
               />
             </label>
 
             <label>
-              Start time
+              <span style={{ display: "block", marginBottom: 6 }}>Start time</span>
               <input
                 type="time"
-                value={sessionForm.startTime}
+                value={form.startTime}
                 onChange={(event) =>
-                  setSessionForm((current) => ({
-                    ...current,
+                  setForm((previous) => ({
+                    ...previous,
                     startTime: event.target.value,
                   }))
                 }
-                required
+                style={{ width: "100%", padding: 10 }}
               />
             </label>
 
             <label>
-              Duration (minutes)
+              <span style={{ display: "block", marginBottom: 6 }}>
+                Duration in minutes
+              </span>
               <input
                 type="number"
                 min="15"
                 max="600"
                 step="15"
-                value={sessionForm.durationMinutes}
+                value={form.durationMinutes}
                 onChange={(event) =>
-                  setSessionForm((current) => ({
-                    ...current,
-                    durationMinutes: Number(event.target.value),
+                  setForm((previous) => ({
+                    ...previous,
+                    durationMinutes: event.target.value,
                   }))
                 }
-                required
+                style={{ width: "100%", padding: 10 }}
               />
             </label>
 
-            <div style={{ display: "flex", gap: 12, flexWrap: "wrap" }}>
-              <button
-                className="voice-send-button"
-                type="submit"
-                disabled={loading || !sessionForm.subjectId}
-              >
-                Confirm and schedule
-              </button>
+            <div className="panel-description">
+              Summary:{" "}
+              {subjects.find(
+                (subject) =>
+                  (subject._id || subject.id) === form.subjectId
+              )?.name || "Choose a subject"}{" "}
+              · {formatDate(form.date)} · {form.startTime} ·{" "}
+              {form.durationMinutes} minutes
+            </div>
 
+            <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
               <button
-                className="icon-button"
                 type="button"
-                disabled={loading}
-                onClick={() => setProposal(null)}
+                className="voice-send-button"
+                onClick={confirmSession}
+                disabled={saving}
+              >
+                {saving ? "Saving…" : "Confirm and schedule"}
+              </button>
+              <button
+                type="button"
+                className="icon-button"
+                onClick={cancelProposal}
+                disabled={saving}
               >
                 Cancel
               </button>
             </div>
-          </form>
-        </section>
+          </div>
+        </div>
       )}
 
-      <section className="panel" style={{ padding: 24, marginTop: 20 }}>
-        <span className="section-eyebrow">QUICK NAVIGATION</span>
-        <h3>Open a StudyPilot workspace</h3>
-        <div className="voice-suggestions">
-          <button className="voice-suggestion" onClick={() => onNavigate?.("planner")}>
-            Study Planner →
-          </button>
-          <button className="voice-suggestion" onClick={() => onNavigate?.("rescue")}>
-            AI Schedule Rescue →
-          </button>
-          <button className="voice-suggestion" onClick={() => onNavigate?.("twin")}>
-            Academic Twin →
-          </button>
+      <div className="panel">
+        <div className="panel-heading">
+          <h3>Try saying</h3>
         </div>
-      </section>
+        <div className="voice-suggestions">
+          {suggestions.map((suggestion) => (
+            <button
+              type="button"
+              className="voice-suggestion"
+              key={suggestion}
+              onClick={() => submitText(suggestion)}
+              disabled={loading || saving}
+            >
+              {suggestion}
+            </button>
+          ))}
+        </div>
+      </div>
     </div>
   );
 }
