@@ -1,4 +1,3 @@
-@'
 # StudyPilot AI
 
 StudyPilot AI is an AI-powered study planning and academic productivity web application designed to help students organize their subjects, plan study sessions, prepare for exams, and recover missed sessions.
@@ -15,11 +14,11 @@ StudyPilot AI is an AI-powered study planning and academic productivity web appl
 
 ## Technology Stack
 
-- Frontend: React and Vite
-- Backend: Node.js and Express
-- Database: MongoDB Atlas
-- AI: Configurable AI provider integration
-- Voice: Browser speech recognition and speech synthesis
+- **Frontend:** React and Vite
+- **Backend:** Node.js and Express
+- **Database:** MongoDB Atlas
+- **AI:** AI provider integration, depending on configured credentials and available quota
+- **Voice:** Browser speech recognition and speech synthesis
 
 ## Project Structure
 
@@ -30,7 +29,7 @@ StudyPilot AI is an AI-powered study planning and academic productivity web appl
 
 - Node.js and npm
 - MongoDB Atlas or another configured MongoDB connection
-- Valid credentials for the AI provider you choose to use
+- Valid credentials and available quota for the configured AI provider
 
 ## Local Setup
 
@@ -39,3 +38,34 @@ StudyPilot AI is an AI-powered study planning and academic productivity web appl
 ```bash
 git clone https://github.com/Asr1403/studypilot-ai.git
 cd studypilot-ai
+```
+
+### 2. Install and run the backend
+
+```bash
+cd server
+npm install
+npm run dev
+```
+
+Configure the required environment variables in `server/.env` before starting the backend. Use the variable names expected by the server code. Never publish API keys, database credentials, or AWS credentials.
+
+### 3. Install and run the frontend
+
+Open a second terminal:
+
+```bash
+cd client
+npm install
+npm run dev
+```
+
+Open the local URL printed by Vite, usually `http://localhost:5173`.
+
+## Notes
+
+AI functionality depends on the configured provider, credentials, network access, and available quota. Voice features depend on browser and operating-system support.
+
+## License
+
+See the `LICENSE` file for licensing information.
